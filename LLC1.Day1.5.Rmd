@@ -1,0 +1,969 @@
+---
+title: "scRNA3"
+author: "Siwakorn"
+date: "2021/3/11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggrepel)
+library(clusterProfiler)
+library(jcolors)
+library("extrafont")
+```
+
+#Setting
+```{r}
+Dot_axis90 = theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.3,color = "black"), axis.title.x = element_blank())
+Dot_scale = scale_size(c(10,20,40,60,80,100),range = c(1.5,8) ) 
+color_orange = scale_color_gradientn(colours = c("grey","yellow","orange","red"), values = c(0,0.1,0.5,1))
+color_SummaerSea = scale_color_gradientn(colours = c("#173F5F","#20639B","#3CAEA3","#F6D55C","#ED553B"))
+
+Dot_theme = theme(text = element_text(color = "black", face = "bold", size =12 ),
+            axis.title = element_blank(),
+            legend.position = "bottom")
+
+find <- function(x,y){
+      rownames(x)[grep(y, rownames(x))]
+}
+
+```
+
+#------------Clustering and Characterization-----------------
+##Read CellRanger
+```{r}
+scRNA3 <- list()
+name = c("Control","Control","Depletion","Depletion","EP2iEP4i")
+for(i in c(1:5) ){
+      data = Read10X(data.dir = paste0("/home/siwakorn/LLC1/scRNA3/CellRangerOut/no",i))
+      scRNA3[[i]] <- CreateSeuratObject(counts = data, project = name[i], min.cells = 3, min.features = 0 )
+}
+```
+
+
+
+##Decontamination by DecontX(Celda)
+```{r}
+print("Decontamination of ambient mRNA")
+sce <- list()
+sce.counts <- list()
+llc1_celda_res <- list()
+decontx_res_sce <- list()
+for(i in 1:5){
+  print(paste0("DecontX: No.",i))
+  sce[[i]] <- as.SingleCellExperiment(scRNA3[[i]])
+  sce.counts[[i]] = SummarizedExperiment::assay(sce[[i]], i = "counts")
+  sce.counts[[i]] <- as.matrix(sce.counts[[i]])
+  llc1_celda_res[[i]] = celda_CG(sce.counts[[i]], K = 19, L = 150)
+  cell_cluster = llc1_celda_res[[i]]@clusters$z 
+  decontx_res_sce[[i]] = decontX(sce.counts[[i]], z = cell_cluster)
+}
+
+for(i in 1:5){
+      decontx_res_sce[[i]] <- readRDS(file = paste0("//home/siwakorn/LLC1/scRNA3/DecontxOut/scRNA3_no",i,"_decontx_result.rds") )
+      tmp = decontx_res_sce[[i]]$resList$estNativeCounts 
+      scRNA3[[i]] <- CreateSeuratObject(tmp, project = paste0("sample",i), min.cells = 3, min.features = 200 )
+      scRNA3[[i]][["percent.mt"]] <- PercentageFeatureSet(scRNA3[[i]], pattern = "^mt-")
+      scRNA3[[i]]$Condition <- name[i]
+      scRNA3[[i]] <- subset(scRNA3[[i]], nFeature_RNA < 8300 & percent.mt < 15 & nCount_RNA > 1000 )
+}
+scRNA3 = scRNA3[1:4]
+saveRDS(object, file = "/home/siwakorn/LLC1/scRNA3/RDS/scRNA3.filterRead.DecontX.Gene8300-.Count100+.mt15-.SeuratObjectList.210312.rds") 
+```
+
+
+#Integration (RScript, Integration.scRNA3HQ.210326.r )
+```{r}
+library(Seurat)
+library(tidyverse)
+options(future.globals.maxSize = 10000 * 1024^2)
+folder = "/home/siwakorn/LLC1/scRNA3/RDS/"
+date = "HQ.210326"
+object <- readRDS(file = "/home/siwakorn/LLC1/scRNA3/RDS/scRNA3.filterRead.DecontX.Gene8300-.Count100+.mt15-.SeuratObjectList.210312.rds")
+             
+for(i in 1:length(object)){
+      object[[i]] <- SCTransform(object[[i]], verbose =F)
+}
+
+saveRDS(object, file= paste0(folder,"object.SCT.",date,".rds"))
+
+
+object.features <- SelectIntegrationFeatures(object.list = object, nfeatures = 3000)
+print("featured")
+saveRDS(object.features, file= paste0(folder,"object.features.SCT.",date,".rds"))
+
+object <- PrepSCTIntegration(object.list = object, anchor.features = object.features, 
+                                   verbose = FALSE)
+print("preped")
+saveRDS(object, file= paste0(folder,"object.SCT.preped.",date,".rds"))
+
+
+object.anchors <- FindIntegrationAnchors(object.list = object, normalization.method = "SCT", 
+                                        anchor.features = object.features, verbose = FALSE)
+saveRDS(object.anchors, file = paste0(folder,"object.anchors.",date,".rds"))
+print("anchored")
+
+object.integrated <- IntegrateData(anchorset = object.anchors, normalization.method = "SCT", 
+                       verbose = FALSE)
+saveRDS(object.integrated, file = paste0(folder,"object.integrated.",date,".rds"))
+print("integrated")
+object.integrated  <- RunPCA(object.integrated, verbose = FALSE)
+object.integrated  <- RunUMAP(object.integrated, dims = 1:50, min.dist = 0.1, spread = 1)
+
+object.integrated <- FindNeighbors(object.integrated, dims = 1:50)
+saveRDS(object.integrated, file = paste0(folder,"object.integrated.",date,".rds"))
+print("saved")
+saveRDS(object.integrated, file = paste0(folder,"object.integrated.NoCluster.",date,".rds"))
+for(i in c(0.2,0.5,0.7,1,1.2)){
+      object.integrated <- FindClusters(object.integrated, resolution = i)
+}
+
+DefaultAssay(object.integrated) <- "RNA"
+object.integrated <- NormalizeData(object.integrated, verbose =F)
+
+
+saveRDS(object.integrated, file = paste0(folder,"object.integrated.",date,".rds"))
+```
+
+
+#Characterization
+```{r, fig.height=8, fig.width=10}
+scRNA3 <- readRDS("/home/siwakorn/LLC1/RDS/Archive/object.integrated.HQ.210326.rds")
+DefaultAssay(scRNA3) <- "integrated"
+scRNA3 <- RunUMAP(scRNA3, dims = 1:30, spread =1, min.dist= 0.8)
+Idents(scRNA3) <- scRNA3$integrated_snn_res.0.2
+
+scRNA3 <- RenameIdents(scRNA3,
+                       '0' = "Epithelial",
+                       '1' = "Myeloid",
+                       '2' = "Myeloid",
+                       '3' = "Myeloid",
+                       '4' = "NonImmune",
+                       '5' = "Epithelial",
+                       '6' = "NonImmune",
+                       '7' = "DC",
+                       '8' = "TAN",
+                       '9' = "Myeloid",
+                       '10' = "Fibroblast",
+                       '11' = "NK&T_cell",
+                       '12' = "Endothelial"
+                       )
+scRNA3$Identity.primary <- factor(Idents(scRNA3), levels = c("DC","NK&T_cell","TAN","Myeloid","Epithelial","Fibroblast","Endothelial","NonImmune") )
+```
+
+##DC
+```{r}
+DC <-subset(scRNA3, idents = "DC")
+DefaultAssay(DC) <- "integrated"
+DC <- FindNeighbors(DC, dims = 1:50)
+DC <- FindClusters(DC, resolution = 0.5)
+DC <- RunUMAP(DC, dims = 1:30, spread =1, min.dist =0.2)
+DC <- RenameIdents(DC, 
+                   '0' = "cDC2",
+                   '1' = "cDC1",
+                   '2' = "mregDC_s1",
+                   '3' = "cDC2_Isg",
+                   '4' = "mregDC_s2",
+                   '5' = "pDC"
+                   )
+DC$Identity1 <- Idents(DC)
+```
+
+##Lymphocyte
+```{r}
+Lymp <- subset(scRNA3, idents = "NK&T_cell")
+Lymp$Identity1 <- Lymp$Identity.primary
+```
+
+##Myeloid
+```{r}
+Myeloid <- subset(scRNA3, idents = "Myeloid")
+DefaultAssay(Myeloid) <- "integrated"
+Myeloid <- FindNeighbors(Myeloid, dims = 1:50)
+Myeloid <- FindClusters(Myeloid, resolution = 0.5)
+Myeloid <- RunUMAP(Myeloid, dims = 1:30, spread =1, min.dist =0.2)
+Idents(Myeloid) <- Myeloid$integrated_snn_res.0.5
+
+Myeloid <- RenameIdents(Myeloid,
+                        '0'= "TAM_s1",
+                        '1'= "Mono_B",
+                        '2'= "Mono_C",
+                        '3'= "Mono_A",
+                        '4'= "Mono_A",
+                        '5'= "Mono_C",                                  #MHC Class II
+                        '6'= "Mono_A",
+                        '7'= "TAM_s2",
+                        '8'= "Mono_D",
+                        '9'= "LQ",
+                        '10'= "TAM_Proliferating",
+                        '11' = "TAM_Isg"
+                        )
+DimPlot(Myeloid, label=T)
+Myeloid$Identity1 <- Idents(Myeloid)
+```
+
+##TAN
+```{r}
+TAN <- subset(scRNA3, idents = "TAN")
+TAN$Identity1 <- TAN$Identity.primary
+Idents(TAN) <- TAN$Identity1
+```
+
+##Non Immune cell
+```{r}
+nonImmune <- subset(scRNA3, idents = "NonImmune")
+DefaultAssay(nonImmune) <- "integrated"
+nonImmune <- FindNeighbors(nonImmune, dims = 1:50)
+nonImmune <- FindClusters(nonImmune, resolution = 0.5)
+nonImmune <- RunUMAP(nonImmune, dims = 1:30, spread =1, min.dist =0.2)
+
+Idents(nonImmune) = nonImmune$integrated_snn_res.0.5
+nonImmune <- RenameIdents(nonImmune,
+                          '0' = "nonImmune_s1",
+                          '1' = "nonImmune_s2",
+                          '2' = "nonImmune_s2",
+                          '3' = "nonImmune_s2",
+                          '4' = "nonImmune_s1",
+                          '5' = "nonImmune_s1"
+                          )
+nonImmune$Identity1 <- Idents(nonImmune)
+```
+
+
+##Combine all Identity
+```{r}
+tmp1 = c( as.character(DC$Identity1), 
+          as.character(Lymp$Identity1), 
+          as.character(TAN$Identity1), 
+          as.character(Myeloid$Identity1), 
+          as.character(nonImmune$Identity1)
+)
+tmp2 = c( names(DC$Identity1), 
+          names(Lymp$Identity1), 
+          names(TAN$Identity1), 
+          names(Myeloid$Identity1), 
+          names(nonImmune$Identity1)
+)
+names(tmp1) = tmp2
+tmp2 = scRNA3[[]] %>% as_tibble(rownames = "CB") %>% dplyr::select(CB, Identity.primary) %>% filter(!Identity.primary %in% c("DC","NK&T_cell","TAN","Myeloid","NonImmune"))
+tmp3 <- as.vector(tmp2$Identity.primary)
+names(tmp3) <- tmp2$CB
+tmp <- c(tmp1,tmp3)
+
+scRNA3 <- AddMetaData(scRNA3, metadata = tmp, col.name = "Identity1")
+levels1 = c("mregDC_s1","mregDC_s2","cDC1","cDC2","cDC2_Isg","pDC","NK&T_cell","TAN","Mono_A","Mono_B","Mono_C","Mono_D","TAM_s1","TAM_s2","TAM_Proliferating","TAM_Isg","Epithelial","Fibroblast","Endothelial","nonImmune_s1","nonImmune_s2","LQ")
+
+scRNA3$Identity1 <- factor(scRNA3$Identity1, levels = levels1 )
+Idents(scRNA3) = scRNA3$Identity1
+```
+
+Clear memory
+```{r}
+DC=0
+Lymp = 0
+Myeloid = 0
+TAN = 0
+nonImmune=0
+```
+
+
+##Add Metadata
+```{r}
+Idents(scRNA3) <- scRNA3$Identity1
+
+scRNA3 = RenameIdents(scRNA3,
+                       'mregDC_s1' = "ImmuneCell",
+                       'mregDC_s2' = "ImmuneCell",
+                       'cDC1'      = "ImmuneCell",
+                       'cDC2'      = "ImmuneCell",
+                       'cDC2_Isg'  = "ImmuneCell",
+                       'pDC'       = "ImmuneCell",
+                       'NK&T_cell' = "ImmuneCell",
+                       'TAN'       = "ImmuneCell",
+                       'Mono_A'    = "ImmuneCell",
+                       'Mono_B'    = "ImmuneCell",
+                       'Mono_C'    = "ImmuneCell",
+                       'Mono_D'    = "ImmuneCell",
+                       'Mono_A'  = "ImmuneCell",
+                       'Mono_A'  = "ImmuneCell",
+                       'TAM_s1'    = "ImmuneCell",
+                       'TAM_s2'    = "LQ",
+                       'TAM_Proliferating' = "ImmuneCell",
+                       'TAM_Isg'      = "ImmuneCell",
+                       'Epithelial'   = "Non_ImmuneCell",
+                       'Fibroblast'   = "Non_ImmuneCell",
+                       'Endothelial'  = "Non_ImmuneCell",
+                       'nonImmune_s1' = "LQ",
+                       'nonImmune_s2' = "LQ"
+                       )
+scRNA3$Immune <- Idents(scRNA3)
+
+Idents(scRNA3) <- scRNA3$Identity1
+
+scRNA3 = RenameIdents(scRNA3,
+                       'mregDC_s1' = "mregDC_s1",
+                       'mregDC_s2' = "mregDC_s2",
+                       'cDC1'      = "cDC1",
+                       'cDC2'      = "cDC2",
+                       'cDC2_Isg'  = "cDC2_Isg",
+                       'pDC'       = "pDC",
+                       'NK&T_cell' = "NK&T_cell",
+                       'TAN'       = "TAN",
+                       'Mono_A'    = "Mono_A",
+                       'Mono_B'    = "Mono_B",
+                       'Mono_C'    = "Mono_C",
+                       'Mono_D'    = "Mono_D",
+                       'TAM_s1'    = "TAM",
+                       'TAM_Isg'      = "TAM_Isg",
+                       'TAM_s2'    = "LQ",
+                       'TAM_Proliferating' = "TAM_Proliferating",
+                       'Epithelial'   = "Epithelial",
+                       'Fibroblast'   = "Fibroblast",
+                       'Endothelial'  = "Endothelial",
+                       'nonImmune_s1' = "LQ",
+                       'nonImmune_s2' = "LQ"
+                       )
+scRNA3$Identity1 <- Idents(scRNA3)
+scRNA3$Identity1.rev <- factor(scRNA3$Identity1, levels = rev(levels(scRNA3$Identity1)))
+Idents(scRNA3) <- scRNA3$Identity1
+
+scRNA3 = RenameIdents(scRNA3,
+                       'mregDC_s1' = "mregDC",
+                       'mregDC_s2' = "mregDC",
+                       'cDC1'      = "cDC1",
+                       'cDC2'      = "cDC2",
+                       'cDC2_Isg'  = "cDC2",
+                       'pDC'       = "pDC",
+                       'NK&T_cell' = "NK&T_cell",
+                       'TAN'       = "TAN",
+                       'Mono_A'    = "Mono_A",
+                       'Mono_B'    = "Mono_B",
+                       'Mono_C'    = "Mono_C",
+                       'Mono_D'    = "Mono_D",
+                       'TAM'    = "TAM",
+                       'TAM_Proliferating' = "TAM_Proliferating",
+                       'TAM_Isg'      = "TAM",
+                       'Epithelial'   = "Epithelial",
+                       'Fibroblast'   = "Fibroblast",
+                       'Endothelial'  = "Endothelial",
+                       'LQ'    = "LQ"
+                       )
+scRNA3$Identity1.reduce <- Idents(scRNA3)
+scRNA3$Identity1.reduce.rev <- factor(scRNA3$Identity1.reduce, levels = rev(levels(scRNA3$Identity1.reduce)))
+DimPlot(scRNA3, label =T)
+```
+
+#Subset data
+```{r}
+DefaultAssay(scRNA3) <- "integrated"
+Idents(scRNA3) <- scRNA3$Immune
+scRNA3
+scRNA3HQ <- subset(scRNA3, idents = c("ImmuneCell","Non_ImmuneCell"))
+scRNA3HQ <- RunUMAP(scRNA3HQ, dims = 1:20, spread = 1, min.dist = 1)
+
+scRNA3I <- subset(scRNA3, idents = "ImmuneCell")
+scRNA3I <- RunUMAP(scRNA3I, dims = 1:20, spread = 1, min.dist = 1)
+
+scRNA3 <- RunUMAP(scRNA3, dims = 1:20, spread = 1, min.dist = 1)
+
+
+```
+
+col.Identity3 <- list(
+  "DC" = c("#004385","#022E4F","#087CA7","#04269F"),
+"NK" = c("#4ab0a8"),
+"T" = c("#3eead4","#00e3c6","#35808b","#358b5b"),
+"TAN" = c("#2c6c36", "#a8cf54"),
+"MDSC" = c("#D14081","#b93731","#EF798A","#7E2E84"),
+"TAM" = c("#e3a32e","#f7d037"),
+"Other" = c("#8B6958","grey","brown","black")
+) 
+#-----Visualization---------
+#Figure 5 
+##Figure 5F UMAP
+```{r}
+col <- list(
+  "DC" = c("#004385","#022E4F","#087CA7","#04269F"),
+"NK.T" = c("#00e3c6"),
+"TAN" = c("#2c6c36"),
+"MDSC" = c("#D14081","#b93731","#EF798A","#7E2E84"),
+"TAM" = c("#e3a32e","#f7d037"),
+"Other" = c("#8B6958","grey","brown")
+)  %>% unlist() %>% as.character()
+
+tiff("/home/siwakorn/LLC1/scRNA3/Fig/210327/scRNA3.UMAP.Identity.UL.tiff", width = 6, height = 6, units = "in", res=300)
+DimPlot(scRNA3, label = F, label.size =4, pt.size =0.5, repel = T, cols = c("firebrick4","dodgerblue4","gray65") ) + #+ NoLegend() 
+      theme(legend.position = "bottom")
+dev.off()
+for(i in 1){
+tiff("/home/siwakorn/LLC1/scRNA3/Fig/210327/scRNA3.HQ.UMAP.IdentityReduce.UL.tiff", width = 6, height = 6, units = "in", res=300)
+print(
+      DimPlot(scRNA3HQ, label = F, label.size =4, pt.size =0.5, repel = F, cols = col ) + #+ NoLegend() 
+      theme(legend.position = "bottom")
+      )
+dev.off()
+}
+tiff("/home/siwakorn/LLC1/scRNA3/Fig/210327/scRNA3.I.UMAP.Identity.L.tiff", width = 6, height = 6, units = "in", res=300)
+DimPlot(scRNA3I, label = T, label.size =4, pt.size =0.5, repel = T, cols = col ) + #NoLegend()  +
+      theme(legend.position = "bottom")
+dev.off()
+
+tiff("/home/siwakorn/LLC1/scRNA3/Fig/210327/scRNA3.I.UMAP.Identity.UL.tiff", width = 6, height = 6, units = "in", res=300)
+DimPlot(scRNA3I, label = F, label.size =4, pt.size =0.5, repel = T, cols = col ) + #NoLegend()  +
+      theme(legend.position = "bottom")
+dev.off()
+
+Idents(scRNA3) <- scRNA3$Identity
+for(i in 1){
+      png("/home/siwakorn/LLC1/scRNA3/Fig/210327/scRNA3.UMAP.Identity.png", width = 6, height = 6, units = "in", res=300)
+      print(
+            DimPlot(scRNA3, label = T, label.size =4, pt.size =0.5, repel = T ) +
+                  theme(legend.position = "bottom")
+      )
+      dev.off()
+}
+```
+
+#Fig 5G Volcalno DT + ISG label
+```{r}
+Idents(scRNA3I) <- scRNA3I$Identity.primary 
+levels(Idents(scRNA3I))
+Myeloid <- subset(scRNA3I, idents = c("Myeloid","TAN"))
+DefaultAssay(Myeloid) <- "RNA"
+Myeloid <- NormalizeData(Myeloid)
+VlnPlot(Myeloid, features = "Ptger4")
+
+Idents(Myeloid) = "Condition"
+DE.scRNA3.DTxControl <- list()
+levels(Idents(Myeloid))
+DE.scRNA3.DTxControl[["Myeloid"]] <- FindMarkers(Myeloid, ident.1 = "Depletion", ident.2 = "Control", logfc.threshold = 0.01)
+DE.scRNA3.DTxControl[["Myeloid"]] %>% arrange(desc(avg_logFC))
+#saveRDS(DE.scRNA3.DTxControl, file = "/home/siwakorn/LLC1/scRNA3/RDS/scRNA3.DE.scRNA3.DTxControl.210327.rds")
+
+Selected.ISG <- list(
+      "ISG" = c("Ifitm1","Ifitm6","Ifitm3","Ifitm2","Nt5c3","Slfn4","Zbp1","Apobec3","Gbp2","Xaf1","Irf7","Ly6e","Fgl2","Rsad2","Cd74","Ddx60","Gm13822","Stat1","Cmpk2","Ifit3","Ifit3b","Ifi27l2a","Ifi204","Slfn1","Isg15","Rtp4","Oasl2","Trim30a","H2-T23","Ifit1","Oasl1","Slfn5","Oas3","Slfn8","Isg20","Oas2","Ifi47","Usp18","Irgm1","Hpse","Ssbp3","Irf3","Nampt","Trim25","Ifit2","Mx1","Mavs","Ddit4","Trim5")) %>% unlist() %>% as.character()
+selected.genes <- Selected.ISG
+
+tmp <- DE.scRNA3.DTxControl[["Myeloid"]] # %>% filter(p_val<0.05)
+tmp$logPvalue <- log10(tmp$p_val)*(-1)
+tmp$used <- "unlabel"
+tmp$Gene <- rownames(tmp)
+#Test wheter selected.genes is in DE.scRNA1.EP2iEP4ixControl.filter table or not (P vlaue < 0.05 or not)
+tmp[intersect(selected.genes, rownames(tmp)),"used"] <- "label"
+tmp <- rbind(filter(tmp, !Gene %in% selected.genes ), filter(tmp, Gene %in% selected.genes ) )  #Bring labeled gene to final row to be on top in plot
+tmp$used <- factor(tmp$used, levels = c("label", "unlabel") )
+xborder = max(abs(tmp$avg_logFC)) +0.08
+yborder = max(max(tmp$logPvalue)) + 10
+ for(i in 1){
+    tiff(filename = paste0("/home/siwakorn/LLC1/scRNA3/Fig/210327/scRNA3.Fig.5G.V2C.ISG.210327.tiff") ,units ="in", width = 9, height = 9, res = 300)
+    print(
+      ggplot(tmp, aes(x = avg_logFC, y = logPvalue, color = used, size = used) )  + 
+        geom_point() +
+        xlim(-1.5, 1.5) +
+        ylab("- log10(p-value)") +
+        scale_color_manual(values = c("firebrick2","gray65"))+ #select gray65 or black
+        scale_size_manual(values = c( 1.5, 0.75) )+
+        theme_linedraw(base_size = 40) +
+        theme(text=element_text(size = 15))+
+        geom_vline(xintercept = c(-0.3,0.3)) +
+        geom_hline(yintercept = c(2)) +
+        geom_text_repel(size =7, fontface ="bold", data = subset(tmp, used == "label"),aes(label = Gene, hjust = 1.2)) + NoLegend()
+      )
+  dev.off()
+    }
+  
+ tmp$used %>% summary ()
+tmp = tmp %>% arrange(desc(avg_logFC))
+tmp
+write.csv(tmp , file = "/home/siwakorn/LLC1/scRNA3/DE.Myeloid.DTxControl.210328.csv")
+write.csv()
+```
+
+#Fig 5G Volcano New
+```{r}
+#ISG genes list (Xuemei Xie, Cheng Li, Hongbo R Luo, Nature Immunology, 2020)
+Selected.ISG <- c("Ifitm1","Ifitm6","Ifitm3","Ifitm2","Nt5c3","Slfn4","Zbp1","Apobec3","Gbp2","Xaf1","Irf7","Ly6e","Fgl2","Rsad2","Cd74","Ddx60","Gm13822","Stat1","Cmpk2","Ifit3","Ifit3b","Ifi27l2a","Ifi204","Slfn1","Isg15","Rtp4","Oasl2","Trim30a","H2-T23","Ifit1","Oasl1","Slfn5","Oas3","Slfn8","Isg20","Oas2","Ifi47","Usp18","Irgm1","Hpse","Ssbp3","Irf3","Nampt","Trim25","Ifit2","Mx1","Mavs","Ddit4","Trim5")
+
+for(q in 1){
+DE = read.csv("//home/siwakorn/LLC1/LLC1.Manucript.April2021/Supplement.Table/scRNA3.4sample.Gene8300-.Count1000+.mt15-.Immune.210329.TableS6.DE.Myeloid.DTxControl.210328.csv")
+DE = DE[,1:6]
+colnames(DE)[c(1,3)] <- c("Genes","avg_log2FC")
+tmp1 = filter(DE, Genes %in% Selected.ISG )
+#tmp1 = tmp1 %>% filter(p_val < 0.05) %>% filter((avg_log2FC < -0.035 | avg_log2FC > 0.035)) 
+tmp1$GeneSet = "ISG"
+tmp2 = filter(DE, !Genes %in% tmp1$Genes)
+tmp2$GeneSet = "non-ISG"
+DE = rbind(tmp1,tmp2)
+DE$LogP = (-1)*log10(DE$p_val)
+DE = filter(DE, p_val != 0)
+DE$GeneSet <- factor(DE$GeneSet, levels = c("ISG","non-ISG"))
+DE$Group <- "New"
+DE$Group[DE$avg_log2FC>0] <- "Upregulated"
+DE$Group[DE$avg_log2FC<0] <- "Downregulated"
+DE$Group = factor(DE$Group, levels = c("Upregulated", "Downregulated"))
+#LLCDF$scRNA1.MyeloidxCondition.DE.Volcano = DE
+#write.csv(DE, file = "//home/siwakorn/LLC1/Fig/220120/DE.scRNA2.Myeloid.csv")
+DE2 = DE
+table(DE2$Group,DE2$GeneSet)
+#DE2 =filter(DE, (avg_log2FC < -0.02 | avg_log2FC > 0.02))
+plot1 = ggplot(DE2, aes(x = avg_log2FC, y = LogP, color = Group)) + 
+      #theme_linedraw(base_size = 40)+
+      theme_classic() +
+      geom_point(alpha =0.2,size = 1, color = "black")+
+      geom_point(aes(size = GeneSet,alpha =GeneSet))+
+      geom_text_repel(color ="black",size =4,fontface ="bold.italic", data = subset(DE, GeneSet == "ISG"),aes(label = Genes, hjust = 1.2)) +
+      scale_size_manual(values = c(2,0.1)) +
+      scale_color_manual(values = c("Red","Blue"))+
+      scale_alpha_manual(values = c(1,0))+
+      geom_vline(xintercept = c(-0.15,0.15),color = "black",size =0.75,linetype = "dashed") +
+      geom_hline(yintercept = c(1.3),color = "black",size =0.75,linetype = "dashed")  +
+      ylab("- log10(p-value)") +
+       NoLegend() +
+      scale_y_continuous(breaks = seq(0,210,50), limits = c(0,210),expand = c(0, 0)) +
+      scale_x_continuous(breaks = seq(-1,1,0.5),limits = c(-1.2,1.2))+
+      labs(x = "log2 fold change",
+           y = "-log(p-value)")+
+      theme(text =element_text(size = 10),
+            axis.text = element_text(size =10, face ="bold",color = "black"),
+            axis.title = element_text(size =14, face = "bold",color = "black")
+      )
+      
+      
+for(i in 1){
+      TIF("Fig.5G.scRNA3.Myeloid.Volcano.ISG.L",8.5,6)
+      print(plot1 )
+      dev.off()
+}
+}
+DE2 %>% filter(GeneSet == "ISG") %>% arrange(desc(p_val)) %>% filter(p_val < 0.05) %>% filter((avg_log2FC < -0.035 | avg_log2FC > 0.035)) %>% arrange(Group)
+```
+
+#Fig S6B COX expression
+```{r}
+Idents(scRNA3HQ) <- scRNA3HQ$Identity.reduce
+DefaultAssay(scRNA3HQ) <- "RNA"
+for(i in 1){
+      tiff(filename = "/home/siwakorn/LLC1/scRNA3/Fig.Revision/scRNA3.FigS6.DotPlot.Cox.2.210406.tiff", width = 10, height = 5.3, units ="in", res =500)
+      print(
+            DotPlot(scRNA3HQ, features = rev(c("Ptgs1","Ptgs2","Ptges","Ptges2","Ptger2","Ptger4")) ) + 
+                  scale_size(range = c(1.5,12),breaks = c(10,20,30,50,70,100), name = "Percent Expression") +
+                  #scale_color_gradientn(colours = c("grey","yellow","orange","red"), values = c(0,0.1,0.5,1)) +
+                  scale_color_gradientn(colours = rev(rainbow(5) )  )   +
+                  Dot_axis90+
+                  coord_flip() +
+                  theme(axis.title = element_blank())
+      )
+      dev.off()
+}
+
+```
+
+
+#Fig Supplement
+##Signature gene plot
+```{r}
+selected.gene.reduce <- c("Ccr7","Ccl5","Il12b","Ccl22","Xcr1","Itgae","Btla",
+                   "Itgax","H2-DMb2","Cd74","Ccl17","Gpr171","Siglech","Ccr9","Iglc3",
+                   "Gzma","Nkg7","Gzmb","Prf1","Klr8","Il2rb",
+                   "Cd3d","Cd4",
+                   "S100a8","S100a9","Cxcl3","Retnlg","Il1r2","Isg15","Csf1r","Vcan",
+                   "Irf7","Ifi203","Mx1","Cxcl10","Fcgr1",
+                   "Spp1","Cxcl1","Tgfbi",
+                   "Axl","H2-Ab1","H2-Eb1",
+                   "Arg1","Vegfa",
+                   "Adgre1","C1qa","Ccl7",
+                   "Mki67","Hist1h3c","Cdca8",
+                   "Krt8","Krt18","Col3a1","Col5a1","Pecam1","Vwf","Pdgfa","Pdgfc" )
+selected.gene.reduce <- c("Ccr7","Ccl5","Il12b","Ccl22","Xcr1","Itgae","Btla",
+                   "Itgax","H2-DMb2","Cd74","Ccl17","Gpr171","Siglech","Ccr9","Iglc3",
+                   "Gzma","Nkg7","Gzmb","Prf1","Klr8","Il2rb",
+                   "Cd3d","Cd4",
+                   "S100a8","S100a9","Cxcl3","Retnlg","Il1r2","Isg15","Csf1r","Vcan",
+                   "Irf7","Ifi203","Mx1","Cxcl10",
+                   "Spp1","Tgfbi",
+                   "Axl","H2-Ab1","H2-Eb1",
+                   "Arg1","Vegfa",
+                   "Adgre1","C1qa","Ccl7",
+                   "Mki67","Hist1h3c","Cdca8",
+                   "Krt8","Krt18","Col3a1","Col5a1","Pecam1","Vwf" )
+
+VlnPlot(scRNA3, features = "Epcam")
+selected.gene <- c("Ccr7","Ccl5","Il12b","1l4i1","Ccl22","Ly75","Xcr1","Itgae","Btla",
+                   "Itgax","H2-Oa","H2-DMb2","Cd74","Cd209a","Ccl17","Clec10a","Gpr171","Siglech","Ccr9","Iglc3","Cd300c",
+                   "Gzma","Nkg7","Gzmb","Prf1","Klr8","Il2rb",
+                   "Cd3d","Cd4","Icos","Cd8a","Xcl1","Ifng","Foxp3","Ctla4","CD274",
+                   "S100a8","S100a9","Cxcl3","Retnlg","Il1r2","Il1f9","Arg2","Cxcr2","Csf3","Hcar2","Cxcl2","Il1b","Isg15","Csf1r","Vcan",
+                   "Irf7","Ifi203","Mx1","Cxcl10","Fcgr1",
+                   "Cxcl1","Spp1","Cxlc2","Cxcl1","Tgfbi",
+                   "Axl","H2-Ab1","H2-Eb1","H2-DMb1","Ccl9",
+                   "Arg1","Vegfa","Cd274","Egln3","Gpnmb",
+                   "Adgre1","C1qa","Ccl7","Ccl12",
+                   "Ighd","Igkc","Ctla4","Tnfrsf9","Tnfrsf18","Cd79b",
+                   "Mki67","Hist1h3c","Cdca8","Hmgb1")
+rownames(scRNA3)[grep("Pdgf", rownames(scRNA3))]
+
+Idents(scRNA3HQ) <- scRNA3HQ$Identity.reduce.rev
+
+scRNA3$Identity.rev <- factor(scRNA3$Identity, levels = rev(levels(scRNA3$Identity)))
+Idents(scRNA3) <- scRNA3$Identity.rev
+
+DefaultAssay(scRNA3HQ) <- "RNA"
+for(i in 1){
+  tiff(filename = "/home/siwakorn/LLC1/scRNA3/Fig/210329/scRNA3.Fig.S6.Signature.viridis.210329.tiff", width = 17, height =8, units = "in", res = 300)
+      PNG("Fig.S9A.scRNA3.Signature",17,8)
+  print(
+    DotPlot(scRNA3HQ, features = unique(selected.gene.reduce)  )  +
+      scale_color_gradientn(colours = col_viridis) +
+      scale_size(range = c(1.5,8),name = "Percent Expression") +
+      theme(axis.text.x =  element_text(size = 22, angle = 90, hjust = 1, vjust = 0.3,face = "italic"), axis.text.y = element_text(size = 20), legend.position = "bottom")
+  )
+  dev.off()
+}
+
+```
+
+##Number
+```{r}
+tmp = table(scRNA3HQ$Identity.reduce, scRNA3HQ$orig.ident) %>% as.matrix() 
+tmp2 = tmp %>% as.data.frame() %>% spread(Var2, Freq)
+write.csv(tmp2, file = "/home/siwakorn/LLC1/scRNA3/Fig/210329/CellNumber.scRNA3.210329.csv")
+```
+
+
+##Lymphotoxicity
+```{r}
+Idents(scRNA3HQ) <- scRNA3HQ$Identity
+levels(Idents(scRNA3HQ))
+Lymp <- subset(scRNA3HQ, idents = "NK&T_cell")
+selected.genes = c("Gzma","Gzmb","Prf1","Ifng")
+Idents(Lymp) <- Lymp$orig.ident
+Idents(Lymp) <- Lymp$Condition
+DimPlot(Lymp)
+Lymp[[]]
+DefaultAssay(Lymp)
+for(i in 1){
+      tiff(filename = "/home/siwakorn/LLC1/scRNA3/Fig.Revision/scRNA3.NK.T.Cytotoxicity.V3.210406.tiff", width = 4, height = 6, units ="in", res =500)
+      print(
+            DotPlot(Lymp, features = selected.genes) +
+                  scale_size(c(10,20,40,60,80,100),range = c(1.5,21) ) +
+                  #scale_color_gradientn(colours = c( "#0C6291", "#FBFEF9","#A63446") ) +
+                  scale_color_gradientn(colours = rev(rainbow(5) )  )   +
+                  theme(axis.title = element_blank(),
+                        axis.text.x = element_text(angle = 45, 
+                                                   face = "bold", hjust =1))+
+                  NoLegend()
+      )
+      dev.off()
+}
+
+```
+
+
+#DE
+```{r}
+Idents(scRNA3I) = scRNA3I$Identity2
+Myeloid <- subset(scRNA3I, idents = c("TAN","Mono_A","Mono_B","Mono_C","Mono_D","TAM"))
+levels(as.factor( Myeloid$orig.ident )) 
+tmp = Myeloid$orig.ident 
+tmp = gsub("sample1", "Control", tmp)
+tmp = gsub("sample2", "Control", tmp)
+tmp = gsub("sample3", "DT", tmp)
+tmp = gsub("sample4", "DT", tmp)
+tmp = gsub("sample5", "EP2iEP4i", tmp)
+tmp %>% as.factor() %>% levels()
+tmp
+Myeloid <- AddMetaData(Myeloid, metadata = tmp, col.name = "Condition")
+table(Myeloid$orig.ident, Myeloid$Condition)
+Idents(Myeloid) = Myeloid$Condition
+DE <- FindMarkers(Myeloid, ident.1= "DT", ident.2 = "Control", logfc.threshold = 0.01 )
+
+DE$logP <- (-1)*log10(DE$p_val)
+DE2 <- DE %>% filter(logP < 300)
+DE2 %>% arrange(desc(avg_logFC))
+DE2
+Selected.ISG <-c("Ifitm1","Ifitm6","Ifitm3","Ifitm2","Nt5c3","Slfn4","Zbp1","Apobec3","Gbp2","Xaf1","Irf7","Ly6e","Fgl2","Rsad2","Cd74","Ddx60",
+                "Gm13822","Stat1","Cmpk2","Ifit3","Ifit3b","Ifi27l2a","Ifi204","Slfn1","Isg15","Rtp4","Oasl2","Trim30a","H2-T23","Ifit1","Oasl1",
+                "Slfn5","Oas3","Slfn8","Isg20","Oas2","Ifi47","Usp18","Irgm1","Hpse","Ssbp3","Irf3","Nampt","Trim25","Ifit2","Mx1","Mavs","Ddit4","Trim5")# %>% unlist() %>% as.character()
+
+tmp1 = DE2 %>% as_tibble(rownames = "Gene") %>% filter(Gene %in% Selected.ISG)
+tmp1$Used <- "Label"
+tmp2 = DE2 %>% as_tibble(rownames = "Gene") %>% filter(!Gene %in% Selected.ISG) 
+tmp2$Used <- "Unlabel"
+DE2 <- rbind(tmp2,tmp1)
+DE2$Used %>% as.factor() %>% summary()
+
+for(i in 1){
+      png(filename = "/home/siwakorn/LLC1/scRNA3/Fig/scRNA3.Myeloid.DE.png", width = 1100, height =900)
+      
+      print(
+            ggplot(DE2, aes(x= avg_logFC, y = logP, color = Used, size = Used)) +geom_point() + ylim(-1,300) + xlim(-1.1,1.1)+
+                  geom_point(size =2.5) +
+                  scale_color_manual(values = c("firebrick2","black"))+
+                  scale_size_manual(values = c(3,0.3) )+
+                  theme_linedraw(base_size = 40)+
+                  theme(text=element_text(size = 15))+
+                  geom_vline(xintercept = c(-0.3,0.3)) +
+                  geom_hline(yintercept = c(2)) +
+                  geom_text_repel(size =7, fontface ="bold",data = subset(DE2, Used == "Label"),aes(label = Gene, hjust = 1.2))
+      )
+      
+      dev.off()
+}
+
+#saveRDS(DE, file = "/home/siwakorn/LLC1/scRNA3/RDS/DE.Myeloid.DTxControl.210324.rds")
+```
+
+
+#-----Analysis : Characterization of new cluster ------
+##DC
+```{r}
+scRNA3 <- readRDS("/home/siwakorn/LLC1/scRNA3/RDS/scRNA3.4sample.Gene8300-.Count1000+.mt15-.Immune.210329.rds")
+Idents(scRNA3) <- scRNA3$Identity
+DimPlot(scRNA3)
+
+DC <- subset(scRNA3, idents = c("mregDC_s1","mregDC_s2","cDC1","cDC2","cDC2_Isg","pDC"))
+DefaultAssay(DC) <- "integrated"
+DC <- RunUMAP(DC, dims=1:30, spread = 1, min.dist =1)
+for(i in 1){
+      png(file = fig("DC.UMAP"), width = 6, height = 6, units= "in", res =300)
+      print(DimPlot(DC, label =T)+
+                  theme(legend.position = "bottom"))
+      dev.off()
+}
+```
+
+###QC
+```{r}
+qc= FetchData(DC, vars = c("nCount_RNA","nFeature_RNA","percent.mt", "Identity", "Identity.reduce")) %>% as_tibble(rownames = "CB")
+qc
+for(i in c("nCount_RNA","nFeature_RNA","percent.mt")){
+      png(filename = fig(paste0("DC.QC.",i) ), width = 7, height = 3, units = "in", res = 400)
+      print(
+            ggplot(qc, aes_string(x = "Identity", y = i)) +
+                  geom_jitter() +
+                  geom_violin(alpha = 0.2, scale = "width", draw_quantiles = c(0.25,0.5,0.75))+
+                  
+                  theme_classic() + 
+                  Dot_axis90       )
+                  
+            
+      dev.off()
+}
+#Evaluate Ribosomal gene / mt genes
+selected.genes = c(rownames(DC)[grep("^mt-", rownames(DC))],(rownames(DC)[grep("Rp", rownames(DC))])[1:15])
+selected.genes
+for(i in 1){
+      png(filename = fig("DC.QC.DotPlot"), width = 9, height = 5, units = "in", res = 400)
+      print(
+            DotPlot(DC, features = selected.genes) + 
+      color_SummaerSea +
+      Dot_scale+
+      theme_minimal() +
+      Dot_axis90 +
+      theme(text = element_text(color = "black", face = "bold" ),
+            axis.text.y = element_text(color = "black"),
+            axis.title = element_blank(),
+            legend.position = "bottom")
+      )
+      dev.off()
+}
+```
+
+###MHC
+```{r}
+#Evaluate MHC
+Idents(DC) <- DC$Identity.rev
+selected.genes = find(DC, "^H2-") %>% sort()
+for(i in 1){
+      png(filename = fig("DC.DotPlot.MHC"), width = 7, height = 3, units = "in", res = 400)
+      print(
+            DotPlot(DC, features = selected.genes) + 
+      color_SummaerSea +
+      Dot_scale+
+      theme_minimal() +
+      Dot_axis90 +
+      theme(text = element_text(color = "black", face = "bold"),
+            axis.text.y = element_text(color = "black"),
+            axis.title = element_blank(),
+            legend.position = "bottom")
+      )
+      dev.off()
+}
+Idents(scRNA3) <- scRNA3$Identity.rev
+for(i in 1){
+      png(filename = fig("DotPlot.MHC"), width = 7, height = 8, units = "in", res = 400)
+      print(
+            DotPlot(scRNA3, features = selected.genes) + 
+                  color_SummaerSea +
+                  Dot_scale+
+                  theme_minimal() +
+                  Dot_axis90 +
+                  theme(text = element_text(color = "black", face = "bold" ),
+                        axis.text.y = element_text(color = "black"),
+                        axis.title = element_blank(),
+                        legend.position = "bottom")
+      )
+      dev.off()
+}
+
+```
+
+###Signature
+```{r}
+Idents(DC) <- DC$Identity.reduce
+Markers.DC <- FindAllMarkers(DC)
+Markers.DC$Ratio <- Markers.DC$pct.1/Markers.DC$pct.2
+Markers.DC %>% group_by(cluster) %>% top_n(n =100 , wt = Ratio) %>% top_n(n =20 , wt = avg_logFC)
+DC.genes = list(
+      "mregDC" = c("Ccr7","Il4i1","Ccl22","Ccl5","Cd200","Socs2","Ly75"),
+      "cDC1" = c("Itgae","Xcr1","Clec9a","","Tlr3","Cd24a"),
+      "cDC2" = c("Itgam","Cd209a","Clec10a","Ccr1","Ccr2","Csf1r","Ccl9"),
+      "pDC" = c("Siglech","Ccr9","Cd300c","Ly6d"),
+      "EP" = c("Ptger2","Ptger4")
+)
+selected.genes = unlist(DC.genes) %>% as.character()
+Idents(DC) <- DC$Identity.rev
+for(i in 1){
+      png(filename = fig("scRNA1.DC.DotPlot.Signature"), width = 8, height = 3, units = "in", res = 400)
+      print(
+            DotPlot(DC2, features = selected.genes) + 
+                  color_SummaerSea +
+                  Dot_scale+
+                  theme_minimal() +
+                  Dot_axis90 +
+                  theme(text = element_text(color = "black", face = "bold" ),
+                        axis.text.y = element_text(color = "black"),
+                        axis.title = element_blank(),
+                        legend.position = "bottom")
+      )
+      dev.off()
+}
+
+
+```
+
+###Treg interaction
+```{r}
+selected.genes <- c("Ccl22","Ccl17","Tnfsf4","Tnfsf9","Cd40","Ptger2","Ptger4")
+Idents(DC) <- DC$Identity.rev
+for(i in 1){
+      png(filename = fig("DC.DotPlot.TregInteraction"), width = 5, height = 3, units = "in", res = 400)
+      print(
+            DotPlot(DC, features = selected.genes) + 
+                  color_SummaerSea +
+                  Dot_scale+
+                  theme_minimal() +
+                  Dot_axis90 +
+                  theme(text = element_text(color = "black", face = "bold" ),
+                        axis.text.y = element_text(color = "black"),
+                        axis.title = element_blank(),
+                        legend.position = "right")
+      )
+      dev.off()
+}
+
+```
+
+###mregDC s1 x s2
+```{r}
+Idents(DC) <- DC$Identity
+DE.mregDC <- FindMarkers(DC, ident.1 = "mregDC_s1", ident.2 = "mregDC_s2")
+DE.mregDC1 <- FindMarkers(DC, ident.1 = "mregDC_s1")
+
+mreg2 <- DE.mregDC %>% arrange(avg_logFC)
+mreg2 <- rownames(mreg2)[1:100]
+mreg1 <- DE.mregDC %>% arrange(desc(avg_logFC))
+mreg1 <- rownames(mreg1)[1:100]
+#GO annotation
+GO.mreg1  <- enrichGO(gene  = mreg1,
+                         OrgDb         = org.Mm.eg.db,
+                      keyType       = 'SYMBOL',
+                      ont           = "BP",
+                      universe = rownames(DC),
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.01,
+                      qvalueCutoff  = 0.05)
+
+GO.mreg2  <- enrichGO(gene  = mreg2,
+                         OrgDb         = org.Mm.eg.db,
+                      keyType       = 'SYMBOL',
+                      ont           = "BP",
+                      universe = rownames(DC),
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.01,
+                      qvalueCutoff  = 0.05)
+summary(GO.mreg1)
+summary(GO.mreg2)
+DE.mregDC <- arrange(DE.mregDC, desc(avg_logFC))
+write.csv(DE.mregDC, file = "/home/siwakorn/LLC1/scRNA3/Fig/210401/scRNA3.DE.mregDC_s1_x_mregDC_s2.210401.csv" ) 
+
+
+selected.genes = c("H2-DMb1","H2-Ab1","H2-DMa","Cd209a","Ifitm1","Ifitm2","Ifitm3","Tgfbi","Ccl5","Ccl22","Il12b","Cd200","Ptger2","Ptger4")
+for(i in 1){
+      png(filename = fig("DC.DotPlot.mregDE.2"), width = 8, height = 4, units = "in", res = 400)
+      print(
+            DotPlot(DC, features = selected.genes) + 
+                  color_SummaerSea +
+                  Dot_scale+
+                  theme_minimal() +
+                  Dot_axis90 +
+                  theme(text = element_text(color = "black", face = "bold" ),
+                        axis.text.y = element_text(color = "black"),
+                        axis.title = element_blank(),
+                        legend.position = "bottom")
+      )
+      dev.off()
+}
+
+
+
+```
+
+###cDC2 ISG
+```{r}
+DE.cDC2 <- FindMarkers(DC, ident.1 = "cDC2", ident.2 = "cDC2_Isg")
+tmp = DE.cDC2 %>% arrange(avg_logFC)
+selected.genes = c("Itgam","Cd209a","Clec10a","Ccr1","Ccr2","Csf1r","Ccl9",rownames(tmp)[1:20])
+
+for(i in 1){
+      png(filename = fig("DC.DotPlot.cDC2.Isg"), width = 10, height = 4, units = "in", res = 400)
+      print(
+            DotPlot(DC, features = selected.genes) + 
+                  color_SummaerSea +
+                  Dot_scale+
+                  theme_minimal() +
+                  Dot_axis90 +
+                  theme(text = element_text(color = "black", face = "bold" ),
+                        axis.text.y = element_text(color = "black"),
+                        axis.title = element_blank(),
+                        legend.position = "bottom")
+      )
+      dev.off()
+}
+
+
+
+num = table(scRNA3$Identity, scRNA3$orig.ident) %>% as.matrix()
+num
+cum =  num %>% colSums()
+cum
+tmp = apply(num, 1, function(x) x/cum*100 ) %>% t() %>% as.data.frame()
+write.csv(tmp, file = "/home/siwakorn/LLC1/scRNA3/Fig/210401/scRNA3.CellPercentage.210401.csv" ) 
+
+```
+
+
+#Save
+```{r}
+#scRNA3.filterRead.DecontX.Gene8300-.Count1000+.mt15-.SeuratObjectList.210312.rds
+#scRNA3.old <- readRDS("~/LLC1/scRNA3/RDS/scRNA3.AddIdentity.210324.rds")
+#saveRDS(scRNA3, file = "~/LLC1/scRNA3/RDS/scRNA3.4sample.Gene8300-.Count1000+.mt15-.210329.rds")
+#saveRDS(scRNA3HQ, file = "~/LLC1/scRNA3/RDS/scRNA3.4sample.Gene8300-.Count1000+.mt15-.HQ.210329..rds")
+#saveRDS(scRNA3I , file = "~/LLC1/scRNA3/RDS/scRNA3.4sample.Gene8300-.Count1000+.mt15-.Immune.210329.rds")
+```

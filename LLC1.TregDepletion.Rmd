@@ -1,0 +1,1184 @@
+---
+title: "LLC1 Day1.5 (scRNA2) Analysis 220201"
+author: "Siwakorn"
+date: "2022/2/2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load Library (R4.1)
+```{r}
+library(Seurat) #Seurat 4.1
+library(tidyverse)
+library(ggrepel)
+library(clusterProfiler)
+library(jcolors)
+library("org.Mm.eg.db")
+library(GOplot)
+library(DOSE)
+library(scales)
+library(enrichplot)
+library(celda) #Celda 1.8.1
+```
+
+
+#Instant command
+```{r}
+Clustering <- function(object,dim,res){
+      object <- FindVariableFeatures(object, selection.method = "vst", nfeatures = 2000)
+      object <- ScaleData(object)
+      object <- RunPCA(object, features = VariableFeatures(object))
+      object <- FindNeighbors(object, dims = 1:dim)
+      object <- FindClusters(object, resolution = res)
+      object <- RunUMAP(object, dims = 1:dim,spread = 2, min.dist=0.2)
+}
+Clustering2 <- function(object,dim=20,res=1,spread =2, dist = 0.2 ){
+      DefaultAssay(object) = "integrated"
+      object <- RunPCA(object, features = VariableFeatures(object))
+      object <- FindNeighbors(object, dims = 1:dim)
+      object <- FindClusters(object, resolution = res)
+      object <- RunUMAP(object, dims = 1:dim,spread = spread, min.dist= dist)
+      DefaultAssay(object) = "RNA"
+      return(object)
+}
+Clustering3 <- function(object,dim=20,res=1,spread =2, dist = 0.2 ){
+      DefaultAssay(object) = "integrated"
+      object <- FindNeighbors(object, dims = 1:dim)
+      object <- FindClusters(object, resolution = res)
+      object <- RunUMAP(object, dims = 1:dim,spread = spread, min.dist= dist)
+      DefaultAssay(object) = "RNA"
+      return(object)
+}
+ReResolution <- function(object,res){
+      DefaultAssay(object) = "integrated"
+      object <- FindClusters(object, resolution = res)
+      DefaultAssay(object) = "RNA"
+      return(object)
+}
+AutoSCT <- function(object,nfeatures = 3000,min.dist = 0.3, spread = 1){
+      for(i in 1:length(object)){
+            object[[i]] <- SCTransform(object[[i]], verbose =F)
+            }
+      object.features <- SelectIntegrationFeatures(object.list = object, nfeatures = nfeatures )
+      print("featured")
+      object <- PrepSCTIntegration(object.list = object, anchor.features = object.features, verbose = FALSE)
+      print("preped")
+      object.anchors <- FindIntegrationAnchors(object.list = object, normalization.method = "SCT", 
+                                        anchor.features = object.features, verbose = FALSE)
+      print("anchored")
+      object.integrated <- IntegrateData(anchorset = object.anchors, normalization.method = "SCT", 
+                       verbose = FALSE)
+      print("integrated")
+      object.integrated  <- RunPCA(object.integrated, verbose = FALSE)
+      object.integrated <- FindNeighbors(object.integrated, dims = 1:50)
+      for(i in c(0.2,0.3,0.5,0.7,1)){
+            object.integrated <- FindClusters(object.integrated, resolution = i )
+            }
+      object.integrated  <- RunUMAP(object.integrated, dims = 1:30, min.dist = min.dist, spread = spread)
+      DefaultAssay(object.integrated) <- "RNA"
+      object.integrated <- NormalizeData(object.integrated, verbose =F)
+      return(object.integrated)
+}
+
+AutoDE <- function(obj,selected.genes,Clustername){
+  df = data.frame()
+  for(i in levels(as.factor(obj$orig.ident) )){
+    print(paste0("Dataset " , i))
+    a = paste0(i,"_EP4")
+    b = paste0(i,"_CD45")
+    print(a)
+    print(b)
+    tmp1 = FindMarkers(obj, ident.1 = a, ident.2 = b, features = selected.genes, logfc.threshold = 0,min.pct =0.01 ) %>% as_tibble(rownames = "Genes")
+    print("pass")
+    tmp1$Cluster = Clustername
+    tmp1$Batch = i
+    df = rbind(df,tmp1)
+    df$Genes <- factor(df$Genes, levels =selected.genes)      
+  }
+  df$log10p = log10(df$p_val)*(-1)
+    df$pval_CATG <- "0.05"
+    df$pval_CATG[df$p_val > 0.05 ] <-">0.05"
+    df$pval_CATG[df$p_val < 0.05 ] <-"<0.05"
+    df$pval_CATG[df$p_val < 0.005 ] <-"<0.005"
+    df$pval_CATG[df$p_val < 0.0005 ] <-"<0.0005"
+    df$pval_CATG <- factor(df$pval_CATG, levels = c(">0.05","0.05","<0.05","<0.005","<0.0005"))
+  return(df)
+}
+AutoHeatmap <- function(df1){
+      ggplot(df1, aes(y = Batch, x = Genes  ) ) + 
+                  geom_tile(color = "white",aes(fill =avg_log2FC)) +
+                  theme_classic() + 
+                  Dot_axis90 + 
+                  #scale_color_gradientn(colours = c("#0C6291","#118dd0","#FBFEF9","#c44558","#A63446"), name = "Average\nLog2 FoldChange") +
+                  scale_fill_gradientn(colours = Col.HiLow.9Shades, 
+                                        #values = c(0, 0.35, 0.5, 0.65, 1), 
+                                          values = rescale(c(min(df1$avg_log2FC),0,max(df1$avg_log2FC)) ),
+                                          name = "Average\nLog2 FoldChange")+
+                  facet_grid( Cluster~ ., scales = "free", space="free", switch = "y") +
+                  theme(axis.title = element_blank(), 
+                        axis.text.x = element_text(size =14, face = "bold"),
+                        axis.text.y = element_text(size =14, face = "bold", color = "black"),
+                        strip.text.y.left = element_text(size =18, face = "bold", color = "white",angle = 0),
+                        strip.background = element_rect(fill = "black"),
+                        strip.placement = "outside",
+                        legend.position = "bottom"
+                        )
+}
+AutoDotPlot <- function(df1){
+            ggplot(df1, aes(y = Batch, x = Genes, color = avg_log2FC,size = pval_CATG  ) ) + 
+                  geom_point() + 
+                  theme_classic() + 
+                  Dot_axis90 + 
+                  #scale_color_gradientn(colours = c("#0C6291","#118dd0","#FBFEF9","#c44558","#A63446"), name = "Average\nLog2 FoldChange") +
+                  scale_color_gradientn(colours = Col.HiLow.9Shades, 
+                                        #values = c(0, 0.35, 0.5, 0.65, 1), 
+                                          values = rescale(c(min(df1$avg_log2FC),0,max(df1$avg_log2FC)) ),
+                                          name = "Average\nLog2 FoldChange")+
+                  scale_size_manual(values = c(1,3,5,7), name = "P Value")  + # + scale_size(c(0,2,5,10),range = c(0,16),name = "Percent Expression") 
+                  facet_grid( Cluster~ ., scales = "free", space="free", switch = "y") +
+                  theme(axis.title = element_blank(), 
+                        axis.text.x = element_text(size =14, face = "bold"),
+                        axis.text.y = element_text(size =14, face = "bold", color = "black"),
+                        strip.text.y.left = element_text(size =18, face = "bold", color = "white",angle = 0),
+                        strip.background = element_rect(fill = "black"),
+                        strip.placement = "outside",
+                        legend.position = "bottom"
+                        )
+}
+
+PlotQC <- function(x,cluster = "seurat_clusters", parameter = "nCount_RNA"){
+      print(
+            ggplot(x[[]], aes_string(x = cluster, y = parameter)) + geom_jitter() +geom_violin(scale = "width")+ theme_minimal() 
+      )
+}
+RevIden <- function(x){
+      factor(x, levels = rev(levels(x)))
+}
+SortIden <- function(x){
+  Idents(x) = factor(Idents(x), levels = sort(levels(as.factor(Idents(x)))))
+  return(x)
+}
+find <- function(x){
+      rownames(LLC[[1]])[grep(x,rownames(LLC[[1]]) )]
+}
+
+Klear <- function(x){
+      for(i in 1:20){dev.off()}
+}
+ShowMe <- function(x){
+      c(rep("black",x-1),"red",rep("black",50))
+}
+```
+
+#Visualization Export
+```{r}
+PNG <- function(x,width = 7, height = 5){
+      png(filename = paste0("/home/siwakorn/LLC1/Fig/220131PNG/",x,".png" ),
+          width = width, 
+          height = height, 
+          units = "in", 
+          res = 500)
+}
+
+TIF <- function(x,width = 7, height = 5){
+      tiff(filename = paste0("/home/siwakorn/LLC1/Fig/220131TIFF/",x,".tiff" ),
+          width = width, 
+          height = height, 
+          units = "in", 
+          res = 500)
+}
+dir.create("//home/siwakorn/LLC1/Fig/220131TIFF/")
+```
+
+#Visualization style
+```{r}
+col_SummaerSea = c("#173F5F","#20639B","#3CAEA3","#F6D55C","#ED553B")
+col_SummaerSea2 = c("#6F42AF","#173F5F","#20639B","#3CAEA3","#F6D55C","#ED553B")
+col_LemonTree <- c("grey", rcartocolor::carto_pal(6, name = "ag_GrnYl") )
+col_viridis <- c("grey",c(viridis::viridis(6))[1:5],"#fecd1a" )
+col_SandRed <-c("#f0eed0","#eae2b7","#fcbf49","#fa9f25","#f77f00","#e75414","#d62828")
+Col.HiLow.9Shades = c("#28198a","#163285","#3d569f","#8b99c2","#ffffff","#fce487","#f9c80e","#f86624","#ea3546")
+Col.HiLow.BR5 <- c("#093559","#1f87b9","white","#c10630","#780028")
+Col.HiLow.BR7 <- c("#093559","#1f87b9","#82c1da","white","#f0826f","#c10630","#780028")
+col_blueShade = c("#03045e", "#023e8a", "#0077b6", "#0096c7", "#00b4d8", "#48cae4", "#90e0ef", "#ade8f4", "#caf0f8")
+col_salmonSteak = c("#264653","#2a9d8f","#e9c46a","#f4a261","#e76f51")
+col_Sunset = c("#03071e","#370617","#6a040f","#9d0208","#d00000","#dc2f02","#e85d04","#f48c06","#faa307","#ffba08")
+Dot_axis90 = theme(axis.text.x =  element_text(size = 15, angle = 90, hjust = 1, vjust = 0.3,color = "black"), axis.text.y = element_text(size = 15)) 
+Dot_scale = scale_size(range = c(1.5,8),name = "Percent Expression") 
+Dot_scale2 = scale_size(c(10,20,40,60,80,100),range = c(0,12),name = "Percent Expression") 
+Dot_scale3 = scale_size(c(10,20,40,60,80,100),range = c(0,16),name = "Percent Expression") 
+
+scale_orange = scale_color_gradientn(colours = c("grey","yellow","orange","red"), values = c(0,0.1,0.5,1))
+scale_SummaerSea = scale_color_gradientn(colours = c("#173F5F","#20639B","#3CAEA3","#F6D55C","#ED553B"))
+scale_SummaerSea2 = scale_color_gradientn(colours = c("#6F42AF","#173F5F","#20639B","#3CAEA3","#F6D55C","#ED553B"))
+
+scale_viridis = scale_color_gradientn(colours = col_viridis )
+scale_LemonTree = scale_color_gradientn(colours = col_LemonTree)
+scale_SandRed = scale_color_gradientn(colours = col_SandRed )
+scale_rainbow = function(x=7){scale_color_gradientn(colours = rev(rainbow(x) ))}
+
+scale_ig = scale_color_gradientn(colours = c("grey","#120078","#9d0191","#fd3a69","#fecd1a"), values = c(0,0.1,0.3,0.6,1))
+scale_SalmonSteak = scale_color_gradientn(colours = c("grey",col_salmonSteak ), values = c(0,0.1,0.2,0.5,0.75,1))
+scale_BlueShade = scale_color_gradientn(colours = c("grey","#03045e", "#023e8a", "#0077b6", "#0096c7", "#00b4d8", "#48cae4"), values = c(0,0.1,0.25,0.4,0.55,0.7,0.85,1))
+scale_Sunset = scale_color_gradientn(colours = c("grey",col_Sunset ), values = c(0,rescale(1:length(col_Sunset), to = c(0.1,1)) ) )
+scale_RedGreen = scale_color_gradientn(colours = c("grey",rev(c("#f94144","#f3722c","#f8961e","#f9c74f","#90be6d","#43aa8b","#577590")) ), values = c(0,0.1,0.2,0.4,0.6,0.8,0.9,1))
+scale_RedGreen2 = scale_color_gradientn(colours = c(rev(c("#f94144","#f3722c","#f8961e","#f9c74f","#90be6d","#43aa8b","#577590")) ))
+Scale_HM_RedBlue1 <- scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446",space = "Lab",name="Scale Expression" ,na.value = "white")
+Scale_HM_RedBlue2 <- scale_fill_gradient2(mid="#FBFEF9",low="#2c75ab",high="#e2413b",space = "Lab",name="Scale Expression" ,na.value = "white") 
+```
+
+#GeneSet
+```{r}
+LLCDF$scRNA1.Markers <- c("Ccr7","Ccl5","Il12b","Il4i1","Ccl22","Ly75","Xcr1","Itgae","Btla",
+                   "Itgax","H2-Oa","H2-DMb2","Cd74","Cd209a","Ccl17","Clec10a","Gpr171","Siglech","Ccr9","Iglc3","Cd300c",
+                   "Gzma","Nkg7","Gzmb","Prf1","Klr8","Il2rb",
+                   "Cd3d","Cd4","Icos","Cd8a","Xcl1","Ifng","Foxp3","Ctla4","CD274",
+                   "S100a8","S100a9","Cxcl3","Retnlg","Il1r2","Il1f9","Arg2","Cxcr2","Csf3","Hcar2","Cxcl2","Il1b","Isg15","Csf1r","Vcan",
+                   "Irf7","Ifi203","Mx1","Cxcl10","Fcgr1",
+                   "Cxcl1","Spp1","Cxlc2","Cxcl1","Tgfbi",
+                   "Axl","H2-Ab1","H2-Eb1","H2-DMb1","Ccl9",
+                   "Arg1","Vegfa","Cd274","Egln3","Gpnmb",
+                   "Adgre1","C1qa","Ccl7","Ccl12",
+                   "Ighd","Igkc","Ctla4","Tnfrsf9","Tnfrsf18","Cd79b",
+                   "Mki67","Hist1h3c","Cdca8","Hmgb1") %>% intersect(rownames(scRNA1))
+LLCDF$GenePw.Tstem <- unlist(list(
+      stem = c("Tcf7","Lef1","Il7r","Xcl1","Gpr183","Ccr7","Klf2","Rasa3","Cdc25b","Lyar","Slamf6","Rasgrp2","Sh3bp5","Slco3a1","Pxn","Cd27","Sp1r1","Sp1r4"),
+dif = c("Gzmb","Gzma","Prf1","Havcr2","Entpd1","Cd69","Ccl3","Itga1","Phda1","Rdh10","Cebpd","Tesc","Cd86","Lag3","Tigit","Pdcd1","Ctla4","Tox","Batf","Itgae","Gzmk")
+)) 
+
+```
+
+#Parameter
+```{r}
+LLCDF$scRNA2.Level.Identity1 = c("mregDC","cDC1","cDC1_Prolif","cDC2","pDC","NK","T_cell","T_CD8","T_CD4","Treg","prolif_T","TAN_s1","TAN_s2" ,"Mono_s1","Mono_s2","Mono_s3","Mono_s4","TAM","TAM_Prolif" , "B_cell","Mono_Bdh2","Mast","Fibroblast","Unk")
+LLCDF$scRNA2.Level.Identity1.reduce = c("mregDC","cDC1","cDC2","pDC","NK","T_cell","TAN_s1","TAN_s2" ,"Mono_s1","Mono_s2","Mono_s3","Mono_s4","TAM","TAM_Prolif" , "B_cell","Minor")
+```
+
+
+#Nomenclature
+```{r}
+Batch = c(rep("scRNA2",6))
+Time = c(rep("Early",6))
+Condition = c("Control","Control","Control","EP2iEP4i","EP2iEP4i","EP2iEP4i")
+ID =  c("Early_Control1","Early_Control2","Early_Control3","Early_EP2iEP4i1","Early_EP2iEP4i2","Early_EP2iEP4i3")
+Sample = paste0(rep("Sample"),1:6)
+```
+
+#Data Directories
+```{r}
+data.dir = c(
+      "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no1/filtered_feature_bc_matrix/",
+      "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no2/filtered_feature_bc_matrix/",
+      "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no3/filtered_feature_bc_matrix/",
+      "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no4/filtered_feature_bc_matrix/",
+      "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no5/filtered_feature_bc_matrix/",
+      "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no6/filtered_feature_bc_matrix/")
+```
+
+```{r}
+PreventRun
+```
+
+#----------Initiation---------------
+```{r}
+LLC <- list()
+LLCDF <- list()
+for(i in 1:length(data.dir) ){
+      tmp = Read10X(data.dir = data.dir[i]  )
+      LLC[[i]] <- CreateSeuratObject(counts = tmp2, project = Batch[i], min.cells = 3, min.features = 0)
+      LLC[[i]][["percent.mt"]] <- PercentageFeatureSet(LLC[[i]], pattern = "^mt-")
+      LLC[[i]]$Time <- as.factor(Time[i])
+      LLC[[i]]$Condition <- as.factor(Condition[i])
+      LLC[[i]]$ID <- as.factor(ID[i])
+      LLC[[i]]$Sample <- as.factor(Sample[i])
+      #LLC[[i]] <- subset(LLC[[i]], subset = nFeature_RNA <4300 & percent.mt <7)
+      LLC[[i]] <- NormalizeData(LLC[[i]], normalization.method = "LogNormalize", scale.factor = 10000)
+      LLC[[i]] <- FindVariableFeatures(LLC[[i]], selection.method = "vst", nfeatures = 2000)
+      LLC[[i]] <- ScaleData(LLC[[i]])
+      LLC[[i]] <- RunPCA(LLC[[i]], features = VariableFeatures(LLC[[i]]))
+      LLC[[i]] <- FindNeighbors(LLC[[i]], dims = 1:30)
+      LLC[[i]] <- FindClusters(LLC[[i]], resolution = 0.8)
+      LLC[[i]] <- RunUMAP(LLC[[i]], dims = 1:30)
+      LLC[[i]]$Cluster <- Idents(LLC[[i]])
+      print(DimPlot(LLC[[i]]) )
+}
+
+for(i in 3){
+      tmp = Read10X(data.dir = "//home/siwakorn/LLC1/scRNA2/CellRangerOutput/no3/raw_feature_bc_matrix/"  )
+      tmp2 = tmp[grep("mm10",rownames(tmp)),]
+      tmp3 = rownames(tmp2)
+      tmp3 = unlist(lapply(tmp3, function(x) str_replace(x,"mm10___","") ))
+      rownames(tmp2) = tmp3
+      print(dim(tmp2))
+      LLC[[i]] <- CreateSeuratObject(counts = tmp2, project = Batch[i], min.cells = 3, min.features = 3)
+      LLC[[i]][["percent.mt"]] <- PercentageFeatureSet(LLC[[i]], pattern = "^mt-")
+      LLC[[i]]$Time <- as.factor(Time[i])
+      LLC[[i]]$Condition <- as.factor(Condition[i])
+      LLC[[i]]$ID <- as.factor(ID[i])
+      LLC[[i]]$Sample <- as.factor(Sample[i])
+      LLC[[i]] <- subset(LLC[[i]], subset =  nCount_RNA > 300)
+      #LLC[[i]] <- subset(LLC[[i]], subset = nFeature_RNA <4300 & percent.mt <7)
+      LLC[[i]] <- NormalizeData(LLC[[i]], normalization.method = "LogNormalize", scale.factor = 10000)
+      LLC[[i]] <- FindVariableFeatures(LLC[[i]], selection.method = "vst", nfeatures = 2000)
+      LLC[[i]] <- ScaleData(LLC[[i]])
+      LLC[[i]] <- RunPCA(LLC[[i]], features = VariableFeatures(LLC[[i]]))
+      LLC[[i]] <- FindNeighbors(LLC[[i]], dims = 1:30)
+      LLC[[i]] <- FindClusters(LLC[[i]], resolution = 0.8)
+      LLC[[i]] <- RunUMAP(LLC[[i]], dims = 1:30)
+      LLC[[i]]$Cluster <- Idents(LLC[[i]])
+      print(DimPlot(LLC[[i]]) )
+}
+names(LLC) = ID
+for(i in 1:length(LLC)){
+      print(LLC[[i]][[]])
+}
+saveRDS(LLC, file = "//home/siwakorn/LLC1/RDS/LLC.List.NativeCounts.220117.rds")
+
+sce <- list()
+sce.counts <- list()
+for(i in 1:length(data.dir) ){
+      print(levels(as.factor(LLC[[i]]$orig.ident )))
+      print(levels(as.factor(LLC[[i]]$Condition)))
+      #sce[[i]] <- Seurat::as.SingleCellExperiment(LLC[[i]])
+      #sce.counts[[i]] = SummarizedExperiment::assay(sce[[i]], i = "counts")
+      #sce.counts[[i]] <- as.matrix(sce.counts[[i]])
+      sce.counts[[i]] <- as.matrix(
+            LLC[[i]]@assays$RNA@counts
+      )
+      tmp = (rowSums(sce.counts[[i]]) > 3 )
+      tmp2 = (colSums(sce.counts[[i]]) != 0 )
+      sce.counts[[i]] = (sce.counts[[i]])[tmp,tmp2] 
+      sce.counts[[i]] %>% rowSums() %>% min() %>% print()
+      sce.counts[[i]] %>% colSums() %>% min() %>% print()
+}
+
+names(sce.counts) <- ID
+
+library(celda)
+sce.decontx <- list()
+for(i in names(sce.counts)){
+      CB = colnames(sce.counts[[i]])
+      cell_cluster = LLC[[i]]$Cluster
+      cell_cluster = cell_cluster[CB] 
+      sce.decontx[[i]] = decontX(sce.counts[[i]], z = cell_cluster)
+}
+for(i in 9){
+      CB = colnames(sce.counts[[i]])
+      cell_cluster = LLC[[i]]$Cluster
+      cell_cluster = cell_cluster[CB] 
+      sce.decontx[[i]] = decontX(sce.counts[[i]], z = cell_cluster)
+}
+lapply(sce.decontx, function(x) dim(x$decontXcounts))
+
+  tmp = sce.decontx[[i]]$decontXcounts
+  tmp1 = colnames(tmp)
+  tmp2 = paste0(tmp1,"_",ID[i])  #Rename Cell Barcode to contain sample ID
+  names(tmp1) = tmp2
+  colnames(tmp) = tmp2
+
+LLC <- list()
+for(i in 1:length( sce.decontx)){
+      tmp = sce.decontx[[i]]$decontXcounts
+      tmp1 = colnames(tmp)
+      tmp2 = paste0(tmp1,"_",ID[i])  #Rename Cell Barcode to contain sample ID
+      names(tmp1) = tmp2
+      colnames(tmp) = tmp2
+      LLC[[i]] <- CreateSeuratObject(counts = tmp, project = Batch[i], min.cells = 3, min.features = 0)
+      LLC[[i]][["percent.mt"]] <- PercentageFeatureSet(LLC[[i]], pattern = "^mt-")
+      LLC[[i]]$Time <- as.factor(Time[i])
+      LLC[[i]]$Condition <- as.factor(Condition[i])
+      LLC[[i]]$ID <- as.factor(ID[i])
+      LLC[[i]]$Sample <- as.factor(Sample[i])
+      LLC[[i]] <- subset(LLC[[i]], subset = percent.mt <10)
+}
+for(i in 9){
+      LLC[[i]] <- CreateSeuratObject(counts = sce.decontx[[i]]$decontXcounts, project = Batch[i], min.cells = 3, min.features = 0)
+      LLC[[i]][["percent.mt"]] <- PercentageFeatureSet(LLC[[i]], pattern = "^mt-")
+      LLC[[i]]$Time <- as.factor(Time[i])
+      LLC[[i]]$Condition <- as.factor(Condition[i])
+      LLC[[i]]$ID <- as.factor(ID[i])
+      LLC[[i]]$Sample <- as.factor(Sample[i])
+      LLC[[i]] <- subset(LLC[[i]], subset = percent.mt <10)
+}
+
+for(i in 1:length(LLC)){
+  LLC[[i]]$CB.Original = colnames(LLC[[i]])
+  tmp = LLC[[i]][[]]
+  tmp2 = paste0(rownames(tmp),"_",tmp$ID )
+  names(tmp2) = rownames(tmp)
+  LLC[[i]]  <- RenameCells(LLC[[i]],new.names = tmp2 )
+}
+for(i in 9){
+  LLC[[i]]$CB.Original = colnames(LLC[[i]])
+  tmp = LLC[[i]][[]]
+  tmp2 = paste0(rownames(tmp),"_",tmp$ID )
+  names(tmp2) = rownames(tmp)
+  LLC[[i]]  <- RenameCells(LLC[[i]],new.names = tmp2 )
+}
+for(i in 1:length(LLC)){
+      print(LLC[[i]][[]])
+}
+
+names(LLC) = ID
+scRNA2 = LLC[1:6]
+```
+
+#Integration
+```{r}
+options(future.globals.maxSize = 100000 * 1024^2)
+object <- scRNA2
+for(i in 1:length(object)){
+      object[[i]] <- subset(object[[i]], nCount_RNA > 1500 & percent.mt < 10 & nFeature_RNA < 7300)
+      object[[i]] <- SCTransform(object[[i]], verbose =F)
+}
+saveRDS(object, file = paste0("//home/siwakorn/LLC1/RDS/scRNA2.SCT.220119.Auto.rds"))
+
+for(i in c(3000)){
+      for(j in c(50)){
+            for(k in c(70)){
+                  tryCatch({
+                        object.features <- SelectIntegrationFeatures(object.list = object, nfeatures = i)
+                        print("featured")
+                        object <- PrepSCTIntegration(object.list = object, anchor.features = object.features,verbose = FALSE)
+                        print("preped")
+                        object.anchors <- FindIntegrationAnchors(object.list = object, normalization.method = "SCT", anchor.features = object.features, verbose = FALSE)
+                        print("anchored")
+                        object.integrated <- IntegrateData(anchorset = object.anchors, normalization.method = "SCT",  verbose = FALSE)
+                        print("integrated")
+                        saveRDS(object.integrated, file = paste0("//home/siwakorn/LLC1/RDS/scRNA2.Integrated.220119.Auto.rds"))
+                        object.integrated <- RunPCA(object.integrated, verbose = FALSE)
+                        object.integrated <- FindNeighbors(object.integrated, dims = 1:j)
+                        object.integrated <- FindClusters(object.integrated, resolution = 1.5 )
+                        object.integrated <- RunUMAP(object.integrated, dims = 1:j, min.dist = 1, spread = 1)
+                        print("clustered")
+                        DefaultAssay(object.integrated) <- "RNA"
+                        object.integrated <- NormalizeData(object.integrated, verbose =F)
+                        a = paste0("nfeatures",i,".Dim",j,".Filter",k)
+                        saveRDS(object.integrated, file = paste0("//home/siwakorn/LLC1/RDS/scRNA2.Integrated.220119.Auto.rds"))
+                  },
+                  error = function(e){print(e)})
+            }
+      }
+}
+scRNA2 = object.integrated
+```
+
+#Characterization
+```{r}
+DimPlot(scRNA2,label =T,cols = c(rep("green",15),"black")) + NoLegend()
+DimPlot()
+scRNA2$Cluster = Idents(scRNA2)
+Idents(scRNA2) = scRNA2$Cluster
+scRNA2 <- RenameIdents(scRNA2,
+                     '17' = "mregDC",
+                     '24' = "cDC1",
+                     '34' = "cDC1_Prolif",
+                     '6' = "cDC2",
+                     '29' = "cDC2",
+                     '28' = "NK",
+                     '22' = "T_cell",
+                     '33' = "T_Prolif",
+                     '9' = "TAN",
+                     '26' = "TAN",
+                     '7' = "Mono_s1",
+                     '8' = "Mono_s1",
+                     '11' = "Mono_s1",
+                     '12' = "Mono_s1",
+                     '14' = "Mono_s1",
+                     '19' = "Mono_s1",
+                     '0' = "Mono_s2",
+                     '27' = "Mono_s2",
+                     '1' = "Mono_s3",
+                     '3' = "Mono_s3",
+                     '21' = "Mono_s3",
+                     '10' = "Mono_s4",
+                     '20' = "Mono_s4",
+                     '2' = "TAM",
+                     '4' = "TAM",
+                     '5' = "TAM",
+                     '15' = "TAM",
+                     '23' = "TAM",
+                     '25' = "TAM",
+                     '13' = "TAM_Prolif",
+                     '16' = "TAM_Prolif",
+                     '18' = "TAM_Prolif",
+                     '35' = "B_cell",
+                     '30' = "Unk",
+                     '31' = "Unk",
+                     '32' = "Unk"
+                     )
+scRNA2$Identity1 = Idents(scRNA2)
+
+
+
+tmp2 = scRNA2[[]] %>% dplyr::select(Identity1) %>% filter(!Identity1 %in% c("Unk") )
+tmp = rbind(tmp1,tmp2)
+nrow(scRNA2[[]])
+
+
+scRNA2$Identity1 <- Idents(scRNA2)
+
+TAN = subset(scRNA2, idents = "TAN")
+TAN <- Clustering2(TAN)
+TAN <- RenameIdents(TAN, '0' = "TAN_s2", '1' = "TAN_s1",'2' ="TAN_s1", '3' = "TAN_s1",'4' = "TAN_s1",'5' = "TAN_s1",'6' = "TAN_s1",'7' = "TAN_s1",'8' = "TAN_s1")
+TAN$Identity1 <- Idents(TAN)
+
+DC2 = subset(scRNA2, idents = "cDC2")
+DC2 <- Clustering2(DC2,res =0.4)
+DC2 <- RenameIdents(DC2 ,'0' = "cDC2" , '1' ="cDC2", '2' = "cDC2" ,'3' = "cDC2",'4' = "cDC2",'5' = "cDC2",'6' = "cDC2",'7' = "pDC" )
+DC2$Identity1 = Idents(DC2)
+
+unk = subset(scRNA2, idents = "Unk")
+unk = Clustering2(unk)
+unk = RenameIdents(unk,'0' = "Unk", '1' = "Mono_Bdh2",'2' = "Fibroblast" ,'3' =  "Mono_Bdh2",'4' = "Unk" ,'5' = "Mono_Bdh2",'6' = "Mast" )
+unk$Identity1 = Idents(unk)
+
+tmp1 = TAN[[]] %>% dplyr::select(Identity1)
+tmp2 = DC2[[]] %>% dplyr::select(Identity1)
+tmp3 = unk[[]] %>% dplyr::select(Identity1)
+tmp4 = scRNA2[[]] %>% dplyr::select(Identity1) %>% filter(!Identity1 %in% c("TAN","cDC2","Unk") )
+tmp = rbind(tmp1,tmp2,tmp3,tmp4)
+nrow(tmp) == nrow(scRNA2[[]])
+
+
+
+tmp$Identity1 <- factor(tmp$Identity1, levels = LLCDF$scRNA2.Level.Identity1)
+tmp$Identity1.reduce = as.character(tmp$Identity1 )
+tmp$Identity1.reduce[tmp$Identity1.reduce == "T_Prolif"] <- "T_cell"
+tmp$Identity1.reduce[tmp$Identity1.reduce == "cDC1_Prolif"] <- "cDC1"
+tmp$Identity1.reduce[tmp$Identity1.reduce == "Mono_Bdh2"] <- "Minor"
+tmp$Identity1.reduce[tmp$Identity1.reduce == "Mast"] <- "Minor"
+tmp$Identity1.reduce[tmp$Identity1.reduce == "Fibroblast"] <- "Minor"
+tmp$Identity1.reduce[tmp$Identity1.reduce == "Unk"] <- "Minor"
+tmp$Identity1.reduce = factor(tmp$Identity1.reduce, levels = LLCDF$scRNA2.Level.Identity1.reduce)
+
+tmp2 = tmp$Identity1
+names(tmp2) = rownames(tmp)
+scRNA2 <- AddMetaData(scRNA2, metadata = tmp2, col.name = "Identity1")
+
+tmp2 = tmp$Identity1.reduce
+names(tmp2) = rownames(tmp)
+scRNA2 <- AddMetaData(scRNA2, metadata = tmp2, col.name = "Identity1.reduce")
+```
+
+
+##Tcell Subclustering 
+```{r}
+Idents(scRNA2) = scRNA2$Identity1.reduce
+Tcell2 <- subset(scRNA2, idents = "T_cell")
+Tcell2 <- Clustering2(Tcell2,spread =2, dist = 1)
+
+Idents(Tcell2) = Tcell2$integrated_snn_res.1
+Tcell2 <- RenameIdents(Tcell2,
+                     '0' = "Treg",
+                     '1' = "T_CD8",
+                     '2' = "nonTreg",
+                     '3' = "prolif_T",
+                     '4' = "nonTreg",
+                     '5' = "nonTreg",
+                     '6' = "T_CD4",
+                     '7' = "Treg",
+                     '8' = "nonTreg"
+)
+Tcell2$Identity1 = Idents(Tcell2)
+nonTreg <- subset(Tcell2, idents = "nonTreg")
+nonTreg <- Clustering2(nonTreg,res = 1.5)
+nonTreg <- RenameIdents(nonTreg,
+                     '0' = "T_CD4",
+                     '1' = "T_CD8",
+                     '2' = "T_CD4",
+                     '3' = "T_CD8",
+                     '4' = "T_CD4",
+                     '5' = "T_CD4",
+                     '6' = "T_CD4"
+                        )
+nonTreg$Identity1 = Idents(nonTreg)
+
+tmp1 = nonTreg[[]] %>% dplyr::select(Identity1)
+tmp2 = Tcell2[[]] %>% dplyr::select(Identity1) %>% filter(!Identity1 == "nonTreg")
+tmp = rbind(tmp1,tmp2)
+tmp2 = tmp$Identity1
+names(tmp2) = rownames(tmp)
+Tcell2 = AddMetaData(Tcell2, metadata = tmp, col.name = "Identity1")
+Idents(Tcell2) = Tcell2$Identity1
+Idents(Tcell2) = RevIden(Idents(Tcell2))
+DotPlot(Tcell2, features = c("Cd3d","Cd3e","Cd4","Tcf7","Cxcr6","Cd8a","Gzma","Gzmb","Prf1","Xcl1","Ifng","Foxp3","Ctla4","Il2ra","Cd274","Mki67","Cdca8","Hist1h1e")) + 
+      scale_color_gradientn(colours = col_LemonTree)+
+      theme(axis.text.x =  element_text(size = 15, angle = 90, hjust = 1, vjust = 0.3), axis.text.y = element_text(size = 15)) +
+      scale_size(range = c(1.5,8),name = "Percent Expression") 
+DimPlot(Tcell2, label =T)
+Treg2 = subset(Tcell2, idents = "Treg")
+
+tmp1 = scRNA2[[]] %>% dplyr::select(Identity1.reduce) %>% filter(!Identity1.reduce == "T_cell")
+tmp2 = Tcell2[[]] %>% dplyr::select(Identity1) 
+colnames(tmp1) <- "Identity1"
+ncol(scRNA2) == (nrow(tmp1) + nrow(tmp2))
+tmp = rbind(tmp1,tmp2)
+tmp2 = tmp$Identity1
+names(tmp2) = rownames(tmp)
+scRNA2 = AddMetaData(scRNA2, metadata = tmp, col.name = "Identity1")
+scRNA2$Identity1 <- factor(scRNA2$Identity1, levels =  LLCDF$scRNA2.Level.Identity1 )
+ scRNA2[[]]
+```
+
+
+
+#Metadata control
+```{r}
+
+scRNA2$Condition <- factor(scRNA2$Condition, levels = c("Control","EP2iEP4i"))
+scRNA2$ID2 <- unlist(lapply(as.character(scRNA2$ID), function(x) str_replace_all(x,"Early_","")  )  )
+scRNA2$ID2 <- factor(scRNA2$ID2, levels = unique(scRNA2$ID2))
+scRNA2$ID <- factor(scRNA2$ID, levels = unique(scRNA2$ID))
+scRNA2$Identity1.reduce_ID <- paste0(scRNA2$Identity1.reduce,"_",scRNA2$ID)
+scRNA2$Identity1.reduce_ID <- factor(scRNA2$Identity1.reduce_ID , levels = unlist(lapply(levels(scRNA2$Identity1.reduce), function(x) paste0(x,"_",levels(scRNA2$ID)))) )
+scRNA2$Identity1.reduce_ID2 <- paste0(scRNA2$Identity1.reduce,"_",scRNA2$ID2)
+scRNA2$Identity1.reduce_ID2 <- factor(scRNA2$Identity1.reduce_ID2 , levels = unlist(lapply(levels(scRNA2$Identity1.reduce), function(x) paste0(x,"_",levels(scRNA2$ID2)))) )
+scRNA2$Identity1.reduce_con <- paste0(scRNA2$Identity1.reduce,"_",scRNA2$Condition )
+scRNA2$Identity1.reduce_con <- factor(scRNA2$Identity1.reduce_con , levels = unlist(lapply(levels(scRNA2$Identity1.reduce), function(x) paste0(x,"_",levels(scRNA2$Condition )))) )
+```
+
+#----------Visualization---------------
+##Fig S11B Proportion
+```{r}
+tmp1 = summary(scRNA2$ID2)
+tmp3 = paste0(names(tmp1)," ",tmp1," cells,  ") %>% paste(collapse = " ")
+tmp1 = scRNA2[[]] %>% dplyr::select(Condition,ID2,Identity1.reduce) %>% filter(!Identity1.reduce == "Minor")
+tmp2 = tmp1
+tmp1$Row = "Replicate"
+tmp1$Plot = tmp1$ID2
+tmp2$Row = "Condition"
+tmp2$Plot = tmp2$Condition
+df = rbind(tmp1,tmp2)
+df$Plot = factor(df$Plot, rev(sort(as.character(unique(df$Plot)))) )
+
+for(i in 1){
+      PNG("Fig.S11B.scRNA2.Proportion",11,3.5)
+      print(
+            ggplot(df, aes(y = Row,fill = Plot))+geom_bar(position = "fill",width = 0.3) + 
+                  theme_classic() + 
+                  scale_fill_manual(values = rev(c("#005f73","#0a9396","#4fb3aa","#94d2bd","#bb3e03","#ee9b00","#ca6702","#c35303")) )+
+                  theme(axis.title.y = element_blank(),
+                        axis.text.y = element_text(size =7,face="bold"),
+                        axis.title.x = element_text(size = 8, face= "bold"),
+                        plot.subtitle = element_text(size =5) )+ NoLegend()
+                   #labs(x = "Proportion",subtitle = tmp3) 
+            )
+      dev.off()
+}
+```
+
+##Fig S11C UMAP
+```{r}
+LLCDF$Col.scRNA2.Identity1.reduce = c("#0080bc","#00b7e6","#00ceeb","#1a8fe0",
+                                      "#008c1c","#00c954",
+                                      "#ff98a1","#e7707b",
+                                      "#ff753f","#ffdb4e","#ffca00","#ef2e2e",
+                                      "#ae45ff","#c915e9","#c800c1",rainbow(5)
+                                      )
+LLCDF$Col.scRNA2.Identity1.reduce = c("#0080bc","#00ceeb","#00b7e6","#1a8fe0",
+                                      "#008c1c","#00c954",
+                                      "#e25168","#ff7e8a",
+                                      "#fd7816","#ee856d","#ffca00","#ef2e2e",
+                                      "firebrick","#a13547","#c800c1",rainbow(5)
+                                      )
+col.Identity.reduce <- list(
+  "DC" = c("#004385","#022E4F","#087CA7","#04269F"),
+"NK" = c("#4ab0a8"),
+"T" = c("#3eead4"),
+"TAN" = c("#2c6c36", "#a8cf54"),
+"MDSC" = c("#D14081","#b93731","#EF798A","#7E2E84"),
+"TAM" = c("#e3a32e","#f7d037"),
+"Other" = c("#8B6958","grey","brown","black")
+) %>% unlist() %>% as.character()
+
+Idents(scRNA2) = scRNA2$Identity1.reduce
+plot = DimPlot(scRNA2, label =F,cols = LLCDF$Col.scRNA2.Identity1.reduce, repel =T ) + NoLegend() #+ ggtitle("LLC1 Day1 Treatment (scRNA2)")
+plot = DimPlot(scRNA2, label =F,cols = col.Identity.reduce, repel =T ) + NoLegend() 
+plot = DimPlot(scRNA2, label =T,cols = LLCDF$Col.scRNA2.Identity1.reduce, repel =T ) + theme(legend.position = "bottom") + ggtitle("LLC1 Day1 Treatment (scRNA2)")
+for(i in 1){
+      PNG("Fig.S11C.scRNA2.UMAP.220125",9,9)
+      print(plot)
+      dev.off()
+}
+
+
+```
+
+
+##Fig S11D Signature Gene
+```{r, fig.width=10}
+DefaultAssay(scRNA2) <- "RNA"
+Idents(scRNA2) <- scRNA2$Identity1.reduce
+
+selected.gene3 <- c("Ccr7","Ccl5","Il12b","1l4i1","Ccl22","Ly75","Xcr1","Itgae","Btla",
+                   "Itgax","H2-Oa","H2-DMb2","Cd74","Cd209a","Ccl17","Clec10a","Gpr171","Siglech","Ccr9","Iglc3","Cd300c",
+                   "Gzma","Nkg7","Gzmb","Prf1","Klr8","Il2rb",
+                   "Cd3d","Cd4","Icos","Cd8a","Xcl1","Ifng","Foxp3","Ctla4","CD274",
+                   "S100a8","S100a9","Cxcl3","Retnlg","Il1r2","Il1f9","Arg2","Cxcr2","Csf3","Hcar2","Cxcl2","Il1b","Isg15","Csf1r","Vcan",
+                   "Irf7","Ifi203","Mx1","Cxcl10","Fcgr1",
+                   "Cxcl1","Spp1","Cxlc2","Cxcl1","Tgfbi",
+                   "Axl","H2-Ab1","H2-Eb1","H2-DMb1","Ccl9",
+                   "Arg1","Vegfa","Cd274","Egln3","Gpnmb",
+                   "Adgre1","C1qa","Ccl7","Ccl12",
+                   "Ighd","Igkc","Ctla4","Tnfrsf9","Tnfrsf18","Cd79b",
+                   "Mki67","Hist1h3c","Cdca8","Hmgb1")
+
+
+Idents(scRNA2) <- RevIden(Idents(scRNA2))
+DefaultAssay(scRNA2) <- "RNA"
+
+for(i in 1){
+  #PNG("Fig.S11C.scRNA2.SignatureGene.Font", 18 , 6.3) #Without Y label
+  TIF("Fig.S11D.scRNA2.SignatureGene.Font", 19.8 , 6.3) #With Y label
+  print(
+    DotPlot(scRNA2, features = unique(selected.gene3)  )  +
+      scale_color_gradientn(colours = col_viridis) +
+      scale_size(range = c(1.5,8),name = "Percent Expression") +
+      #theme_minimal()+
+      theme(axis.title = element_blank(),
+            axis.text.x =  element_text(size = 15, angle = 90,color="black", hjust = 1, vjust = 0.3, family = "Arial",face = "italic"), 
+            #axis.text.y = element_blank(),
+            axis.text.y = element_text(size = 20, color ="black",family = "Arial"),
+            legend.position = "bottom") 
+          #ggtitle("LLC1 Day1 Treatment ")
+  )
+  dev.off()
+}
+
+```
+
+##Fig S11E Angiogenesis Dotplot
+```{r}
+selected.gene <- c("Vegfa","Ptgs2","Il1b","Fos","Hif1a","Cxcl2","Osm","Nr4a1","Cxcr4","Tnfaip2")
+selected.cluster <- c("TAN_s1","TAN_s2","Mono_s1","Mono_s2","Mono_s3","Mono_s4", "TAM")
+selected.condition <- c("Control","EP2iEP4i")
+
+for(m in 1){
+Idents(scRNA2) <- scRNA2$Identity1.reduce
+Dataset = subset(scRNA2, idents = selected.cluster)
+summary(Dataset$Identity1 )
+DefaultAssay(Dataset) <- "RNA"
+Idents(Dataset) <- Dataset$Identity1.reduce_con
+df <- DotPlot(Dataset, features = selected.gene )$data 
+#Create Identity column
+tmp = df$id
+for(i in c("_Control","_EP2iEP4i","_EP2i","_EP4i")){
+  tmp <- lapply(tmp, function(x) str_remove(x, i) ) %>% unlist()
+}
+df$Identity <- tmp
+
+#Create Condition column
+tmp = df$id
+for(i in selected.cluster){
+  tmp <- lapply(tmp, function(x) str_remove(x, paste0(i,"_")) ) %>% unlist()
+}
+df$Condition <- tmp
+
+#df.bk <- df
+df$Exp.round <- round(df$avg.exp,2)
+df$Log1P <- log1p(df$avg.exp)
+
+#Add levels
+df$Identity <- factor(df$Identity, levels = selected.cluster)
+df$Condition <- factor(df$Condition, levels = selected.condition)
+df$features.plot <- factor(df$features.plot, levels = rev(selected.gene) )
+}
+LLCDF$scRNA2.Angiogenesis.Dotplot <- df
+df.filter <- filter(df, Condition %in% c("Control","EP2iEP4i"))
+df.filter
+
+for(i in 1){
+  #tiff(filename = fig("Fig3A.AngiogenesisDotplot.V2"), width = 8, height =7, units = "in", res = 500)
+  PNG("Fig.S11E.scRNA2.Angiogenesis.Dotplot",9.5,6.2)
+  print(
+  ggplot(df.filter, aes(x = Condition, y = features.plot, color = avg.exp.scaled, size = pct.exp)) + 
+    geom_point() +
+    geom_text(aes(label= Exp.round, x= Condition , y= features.plot), size=3,fontface="bold", colour = "black") +
+    scale_color_gradientn(colours = rev(rainbow(5) )  )   +
+    #scale_color_manual(values=c("seagreen2","firebrick2","skyblue1","plum1","grey60","grey60"), na.value = "grey60")+                                                     #Color setting
+    scale_size(breaks = c(10,20,40,60,80,100),
+               labels = c(10,20,40,60,80,100),
+               range = c(0,16),
+               name = "Percent\nExpressing Cell") +
+    facet_grid( ~ Identity, scales = "free", space="free") +
+    theme_classic() +
+    theme(text = element_text(size = 30,family = "Arial"),
+        axis.title = element_blank(),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_text(color ="black", size =14,face = "bold"),
+        axis.text.x = element_text(angle = 90, hjust = 1, color ="black", size =9),
+        legend.title = element_text(colour="black", size= 7, face="bold"),
+        legend.text = element_text(colour="black", size = 7, face = "bold"),
+        strip.text.x = element_text(angle = 0, size = 7,face = "bold", hjust=0.5, color="white"),
+        #strip.text.y = element_blank(),
+        strip.text.y = element_text(angle = 90,size = 55, face = "bold"),
+        panel.border = element_blank(),
+        strip.background.x = element_rect(fill="black"),
+        #strip.background.y = element_blank(),
+        legend.position="right") 
+  )
+  dev.off()
+
+}
+```
+
+
+
+##Fig S11F NFKB Average
+```{r}
+selected.cluster <- c("TAN_s1","TAN_s2","Mono_s1","Mono_s2","Mono_s3","Mono_s4","TAM")
+selected.genes = c("Nfkbia","Nfkb1","Nfkbid","Nfkb2","Nfkbil1","Nfkbiz","Rela","Relb")
+df = data.frame()
+for(i in selected.cluster){
+      print(i)
+      tmp = subset(scRNA2, idents = i)
+      Idents(tmp) = tmp$ID2
+      tmp2 = DotPlot(tmp , features = selected.genes)$data %>% dplyr::select(features.plot,id, avg.exp.scaled) %>% spread(id,avg.exp.scaled)
+      tmp2A = tmp2 %>% dplyr::select(features.plot,starts_with("EP2iEP4i"))
+      x = grep("EP2iEP4i",colnames(tmp2A))
+      tmp2A$Avg.Scaled.Exp = rowMeans(tmp2A[,x])
+      tmp2A$Cluster = i
+      tmp2A$Condition = "EP2iEP4i"
+      tmp2B = tmp2 %>% dplyr::select(features.plot,starts_with("Control"))
+      tmp2B$Avg.Scaled.Exp = rowMeans(tmp2B[,x])
+      tmp2B$Cluster = i
+      tmp2B$Condition = "Control"
+      df = rbind(df, dplyr::select(tmp2A, Cluster, features.plot, Condition, Avg.Scaled.Exp),dplyr::select(tmp2B, Cluster, features.plot, Condition, Avg.Scaled.Exp))
+}
+df$Cluster <- factor(df$Cluster, levels = selected.cluster)
+
+LLCDF$scRNA2.NFKBxCondition.Heatmap.Avg.Scale <- df 
+
+
+df1 = LLCDF$scRNA1.NFKBxCondition.Heatmap.Avg.Scale 
+df2 = LLCDF$scRNA2.NFKBxCondition.Heatmap.Avg.Scale 
+df1$Time = "Day6"
+df2$Time = "Day1"
+df = rbind(df1,df2)
+df$Time <- factor(df$Time,levels = c("Day1","Day6"))
+df$features.plot <- factor(df$features.plot, levels = rev(sort(selected.genes) ))
+
+#LLCDF$LLC.NFKBxCondition.Heatmap.Avg.Scale <- df 
+
+plot = ggplot(df, aes(x = Condition, y = features.plot)) + 
+      geom_tile(color = "white", aes(fill = Avg.Scaled.Exp) )+
+      #scale_fill_gradientn(colours = Col.HiLow.9Shades         ) +
+      #scale_fill_gradientn(colours = Col.HiLow.BR7,name="Average\nScale Expression" ,na.value = "white"        ) +
+      scale_fill_gradient2(mid="#FBFEF9",low="#2c75ab",high="#e2413b",space = "Lab",name="Scale Expression" ,na.value = "white") +   
+      facet_grid(Time ~ Cluster , scales = "free", space="free",switch = "y") +
+      theme_bw()+
+      theme(strip.placement = "outside",
+            legend.position = "right",
+            panel.border = element_blank(),
+            strip.text = element_text(angle = 0, size = 6,face = "bold", hjust=0.5, color="white"),
+            strip.background = element_rect(fill="black"),
+            axis.title = element_blank(),
+            axis.text.y = element_text(color = "black",face= "bold", family = "Arial",size = 8),
+            axis.text.x = element_text(color = "black",face= "bold", family = "Arial",size = 8,angle =90)
+            ) 
+      labs(caption = "The average gene expression was used to calculate scale expression in each sample
+           Average scale expression was mean of scale expression within group
+           Day 6: n = 2/Group
+           Day 1: n = 3/Group ")
+for(i in 1){
+      PNG("Fig.S11F.LLC.NFKBxID2.Heatmap.AvgOfScale.Exp",8.5,7)
+      print(plot)
+      dev.off()
+}
+```
+
+##Fig S11F NFKB Fold Change
+```{r}
+selected.cluster <- c("TAN_s1","TAN_s2","Mono_s1","Mono_s2","Mono_s3","Mono_s4","TAM")
+selected.genes = c("Nfkbia","Nfkb1","Nfkbid","Nfkb2","Nfkbil1","Nfkbiz","Rela","Relb") %>% sort()
+Idents(scRNA2) = scRNA2$Identity1.reduce
+df = data.frame()
+for(i in selected.cluster){
+      tmp1 = subset(scRNA2, idents = i)
+      Idents(tmp1) = tmp1$Condition 
+      tmp2 = FindMarkers(tmp1, ident.1 = "EP2iEP4i", ident.2 = "Control", features = selected.genes,logfc.threshold = 0,  min.pct = 0.01)
+      tmp2$Identity = i
+      tmp2$Genes = rownames(tmp2)
+      tmp2$Time = "Day1.5"
+      df = rbind(df,tmp2)
+}
+
+Idents(scRNA1) = scRNA1$Identity1.reduce
+for(i in selected.cluster){
+      tmp1 = subset(scRNA1, idents = i)
+      Idents(tmp1) = tmp1$Condition 
+      tmp2 = FindMarkers(tmp1, ident.1 = "EP2iEP4i", ident.2 = "Control", features = selected.genes,logfc.threshold = 0,  min.pct = 0.01)
+      tmp2$Identity = i
+      tmp2$Genes = rownames(tmp2)
+      tmp2$Time = "Day6"
+      df = rbind(df,tmp2)
+}
+df$Genes <- factor(df$Genes, levels = rev(selected.genes))
+df$Identity <- factor(df$Identity, levels = selected.cluster)
+LLCDF$LLC.NFKB.EP2iEP4iFC <- df
+df = LLCDF$LLC.NFKB.EP2iEP4iFC 
+for(i in 1){
+      TIF("Fig.S11F.LLC.Heatmap.FC.NFKB",8,4 )
+      print(
+            ggplot(df, aes(y = Genes, x = Time)) +
+                  geom_tile(color = "white", aes(fill = avg_log2FC)) +
+                  theme_classic() +
+                  Dot_axis90 +
+                  scale_fill_gradientn(colours = c("#2c75ab","#FBFEF9","#e2413b") ,
+                                       values = rescale(c(min(df$avg_log2FC),0,max(df$avg_log2FC)) )
+                                       ) +
+                  theme(axis.text.y = element_text(color = "black",face="bold.italic"),
+                        axis.title = element_blank() )+
+                  facet_grid( ~ Identity , scales = "free", space="free") 
+                  
+      )
+      dev.off()
+}
+```
+
+##Fig S11G Vln mregDC CCL22
+```{r}
+Idents(scRNA2) = scRNA2$Identity1.reduce
+tmp1 = subset(scRNA2, idents = "mregDC")
+Idents(tmp1) = tmp1$Condition
+tmp2 = VlnPlot(tmp1, features = "Ccl22")$data
+for(i in 1){
+      PNG("Fig.S11G.scRNA2xCon.mregDC.CCL22.Vln.L",2.4,6.6)
+      print(
+            ggplot(tmp2, aes(x=ident, y = Ccl22,fill = ident)) + 
+                  geom_violin(scale = "width", draw_quantiles = c(0.5),width =0.6, color = "black",size = 1) + 
+                  geom_jitter(size=0.7) + 
+                  theme_classic()+
+                  scale_fill_manual(values = c("#c8c6a7","#16697a"))+
+                  Dot_axiS110+
+                  #theme(axis.title.x = element_blank(),axis.text.x = element_blank(),axis.text.y = element_blank(),axis.title.y = element_blank())+
+                  NoLegend()
+                  #ggtitle("avg_log2FC: -0.6866641 \np_val:7.072558e-06 \nadj.p_val:0.1261674")
+            
+      )
+      dev.off()
+}
+```
+
+##Fig S11H Tcell UMAP
+```{r}
+for(i in 1){
+  PNG("Fig.S11H.scRNA2.Tcell.UMAP.L", 7,7)
+  print(
+    DimPlot(Tcell2, cols = c("#499764","#96C5F7","#ef798a","#F9C846"), label =F, pt.size = 2.5, label.size = 10) #+ NoLegend()
+  )
+  dev.off()
+}
+```
+
+##Fig S11I Tcell signature
+```{r}
+selected.genes <- c("Cd3d","Cd3e","Cd4","Tcf7","Cxcr6","Cd8a","Gzma","Gzmb","Prf1","Xcl1","Ifng","Foxp3","Ctla4","Il2ra","Cd274","Mki67","Cdca8","Hist1h1e")
+# "Sell","Il7r","Ccr7","Cd44","Cd69"
+Idents(scRNA2) = scRNA2$Identity1.reduce
+Tcell2 = subset(scRNA2, idents = "T_cell")
+Idents(Tcell2) <- factor(Tcell2$Identity1, levels = rev(c("T_CD4","T_CD8","Treg","prolif_T") ) )
+for(i in 1){
+  TIF("Fig.S11I.scRNA2.Tcell.Signature.Flip1.TOP", 6,3.2)
+  #PNG("Fig.S11I.scRNA2.Tcell.Signature.Flip1.TOP.L", 10,3.2)
+  print(
+    DotPlot(Tcell2, features = selected.genes) + 
+      scale_color_gradientn(colours = col_LemonTree)+
+      #theme(axis.text.x =  element_text(size = 15, angle = 270, hjust = 1, vjust = 0.3), axis.text.y = element_text(size = 15), legend.position = "bottom") +
+      theme(axis.text.x.top =  element_text(size = 15, angle = 270, hjust = 1, vjust = 0.3,face = "italic"), axis.text.y = element_text(size = 15), legend.position = "bottom") +
+      #theme(axis.title = element_blank(),axis.text.x =  element_text(size = 15, angle = 90, hjust = 1, vjust = 0.3), axis.text.y = element_blank(), legend.position = "bottom") +
+      scale_size(range = c(1.5,8),name = "Percent Expression") +
+      scale_x_discrete(position = "top")     
+  )
+}
+
+```
+
+##Fig S11J-K Treg signature 
+###Calculation
+```{r}
+selected.genes = c("Foxp3","Stat5b","Il2ra","Ctla4","Tnfrsf4","Tnfrsf9","Tnfrsf18")
+Treg2 = subset(Tcell2, idents = "Treg")
+Idents(Treg2) ="Condition"
+DotPlot(Treg2, features = selected.genes ) 
+for(i in 1){
+      df = DotPlot(Treg2, features = selected.genes )$data 
+      df$Exp.round = round(df$avg.exp, digits = 2)
+      df$features.plot <- factor(df$features.plot, levels = rev(selected.genes))
+}
+df$Time = "Day1.5"
+LLCDF$scRNA2.TregxCondition.TregSignature <- df
+
+###FoldChange Manual
+df2 = df %>% dplyr::select(-Exp.round, - avg.exp.scaled, - pct.exp) %>% as_tibble()
+df2 = df2 %>% spread(key = id, value = avg.exp)
+df2$Log2_FC = log2(df2$EP2iEP4i/df2$Control)
+df2$Time = "Day1.5" 
+df2$features.plot <- factor(df2$features.plot, levels = rev(selected.genes))
+LLCDF$scRNA2.TregxCondition.TregSignature.FC.Manual <- df2
+
+###FoldChange FindMarker
+df3 = FindMarkers(Treg2, ident.1 = "EP2iEP4i", ident.2 = "Control", features = selected.genes,logfc.threshold = 0,min.pct = 0.01) %>% as_tibble(rownames = "features.plot")
+df3$Time = "Day1.5"
+df3$features.plot <- factor(df3$features.plot, levels = rev(selected.genes))
+LLCDF$scRNA2.TregxCondition.TregSignature.FC.Auto <- df3
+
+```
+
+
+###Plot
+```{r}
+df = LLCDF$scRNA2.TregxCondition.TregSignature 
+plot = ggplot(df, aes(x = id, y = features.plot, color =avg.exp, size = pct.exp)) +
+      geom_point() +
+      geom_text(aes(label= Exp.round, x= id , y= features.plot), size=4,fontface="bold", colour = "black") +
+      theme_classic() +
+      scale_color_gradientn(colours = rev(rainbow(5) ), name = "Absolute\nAverage expression" )+
+      #scale_color_gradientn(colours = rev(jcolors("rainbow")), name = "Absolute\nAverage expression" )+
+      scale_size(range = c(2,15),name = "Percent Expressed cell")  +
+      #ggtitle("Average Expression in Treg (scRNA1, submitted)") +
+      theme(axis.text.x = element_text(size =12, face = "bold",color = "black"),
+            axis.text.y= element_text(size =12, face = "bold",color = "black"),
+            axis.title = element_blank(),
+            plot.title= element_text(face = "bold"))
+for(i in 1){
+      TIF("Fig.S11JscRNA2.TregxCondition.TregSignature.AbsExp",5,4)
+      #TIF("scRNA2.TregxCondition.TregSignature.AbsExp2",5,6)
+      print(plot)
+      dev.off()
+}
+
+df = rbind(LLCDF$scRNA2.TregxCondition.TregSignature.FC.Manual,LLCDF$scRNA1.TregxCondition.TregSignature.FC.Manual  )
+plot2 = ggplot(df, aes(x = Time, y = features.plot)) + 
+      geom_tile(color = "white", aes(fill = Log2_FC) )+
+      theme_classic()+
+      #scale_fill_gradientn(colours = Col.HiLow.9Shades         ) +
+      #scale_fill_gradientn(colours = Col.HiLow.BR7,name="Average\nScale Expression" ,na.value = "white"        ) +
+      scale_fill_gradient2(mid="#FBFEF9",low="#2c75ab",high="#e2413b",space = "Lab",name="Log2_FoldChange\n(EP2iEP4i/Control)" ,na.value = "white")+
+      theme(axis.text.x = element_text(size =12, face = "bold",color = "black",angle = 45,hjust =1),
+            axis.text.y= element_text(size =12, face = "bold",color = "black"),
+            axis.title = element_blank(),
+            plot.title= element_text(face = "bold"))
+for(i in 1){
+      TIF("Fig.S11K.LLC1.TregxCondition.TregSignature.FC.Manual",3.5,4)
+      print(plot2)
+      dev.off()
+}
+
+```
+
+
+##Fig S11L ISG Volcano
+```{r}
+Idents(scRNA2) = scRNA2$Identity1.reduce
+DimPlot(scRNA2)
+Myeloid = subset(scRNA2, idents = c("TAN_s1","TAN_s2","Mono_s1","Mono_s2","Mono_s3","Mono_s4","TAM"))
+saveRDS(Myeloid, file = "//home/siwakorn/LLC1/RDS/scRNA2.Myeloid.220121.rds")
+```
+
+###Rscript to compute DE
+```{r}
+
+library(Seurat)
+library(tidyverse)
+Myeloid <- readRDS(file = "//home/siwakorn/LLC1/RDS/scRNA2.Myeloid.220121.rds")
+Idents(Myeloid) = "Condition"
+tmp = FindMarkers(Myeloid, ident.1 = "EP2iEP4i", ident.2 = "Control", logfc.threshold = 0 ,min.pct = 0.05 ) 
+saveRDS(tmp, file = "//home/siwakorn/LLC1/RDS/scRNA2.DE.Myeloid.Condition.220121.rds")
+```
+
+```{r}
+DE = readRDS(file = "//home/siwakorn/LLC1/RDS/scRNA2.DE.Myeloid.Condition.220121.rds")
+Selected.ISG <- c("Ifitm1","Ifitm6","Ifitm3","Ifitm2","Nt5c3","Slfn4","Zbp1","Apobec3","Gbp2","Xaf1","Irf7","Ly6e","Fgl2","Rsad2","Cd74","Ddx60","Gm13822","Stat1","Cmpk2","Ifit3","Ifit3b","Ifi27l2a","Ifi204","Slfn1","Isg15","Rtp4","Oasl2","Trim30a","H2-T23","Ifit1","Oasl1","Slfn5","Oas3","Slfn8","Isg20","Oas2","Ifi47","Usp18","Irgm1","Hpse","Ssbp3","Irf3","Nampt","Trim25","Ifit2","Mx1","Mavs","Ddit4","Trim5")
+LLCDF$scRNA2.MyeloidxCondition.DE = DE
+DE$Genes = rownames(DE)
+tmp1 = filter(DE, Genes %in% Selected.ISG )
+tmp2 = filter(DE, !Genes %in% Selected.ISG)
+tmp1$GeneSet = "ISG"
+tmp2$GeneSet = "non-ISG"
+DE = rbind(tmp1,tmp2)
+DE$LogP = (-1)*log10(DE$p_val)
+DE = filter(DE, p_val != 0)
+DE$GeneSet <- factor(DE$GeneSet, levels = c("ISG","non-ISG"))
+DE$Group <- "New"
+DE$Group[DE$avg_log2FC>0] <- "Upregulated"
+DE$Group[DE$avg_log2FC<0] <- "Downregulated"
+DE$Group = factor(DE$Group, levels = c("Upregulated", "Downregulated"))
+LLCDF$scRNA2.MyeloidxCondition.DE.Volcano = DE
+#write.csv(DE, file = "//home/siwakorn/LLC1/Fig/220120/DE.scRNA2.Myeloid.csv")
+
+#DE2 =filter(DE, (avg_log2FC < -0.02 | avg_log2FC > 0.02))
+DE2 =DE
+plot1 = ggplot(DE2, aes(x = avg_log2FC, y = LogP, color = Group)) + 
+      theme_linedraw(base_size = 40)+
+      theme(text =element_text(size = 10))+
+      geom_point(alpha =0.2,size = 1, color = "black")+
+      geom_point(aes(size = GeneSet,alpha =GeneSet))+
+      geom_text_repel(color ="black",size =3,fontface ="bold", data = subset(DE, GeneSet == "ISG"),aes(label = Genes, hjust = 1.2)) +
+      scale_size_manual(values = c(2,0.1)) +
+      scale_color_manual(values = c("Red","Blue"))+
+      scale_alpha_manual(values = c(1,0))+
+      geom_vline(xintercept = c(-0.15,0.15),color = "black",size =0.75,linetype = "dashed") +
+      geom_hline(yintercept = c(1.3),color = "black",size =0.75,linetype = "dashed")  +
+      ylab("- log10(p-value)") +
+       NoLegend() +
+      scale_y_continuous(breaks = seq(0,320,50), limits = c(0,320),expand = c(0, 0)) +
+      scale_x_continuous(breaks = seq(-1,1,0.5),limits = c(-1.1,1.1))+
+      labs(x = "log2 fold change",
+           y = "-log(p-value)")+
+      theme(text =element_text(size = 10),
+            axis.text = element_text(size =10, face ="bold",color = "black"),
+            axis.title = element_text(size =14, face = "bold",color = "black")
+      )
+
+for(i in 1){
+      TIF("Fig.S11L.scRNA2.Myeloid.Volcano.ISG",5,5)
+      print(plot1 )
+      dev.off
+
+      }
+ 
+```
+
+#Data for GEO submission
+```{r}
+df = scRNA2@assays$RNA@data %>% as.data.frame()
+
+scRNA2[[]]
+Meta = scRNA2[[]] 
+colnames(Meta)
+```
+
+
+```{r}
+write.csv(Meta, file = "//home/siwakorn/LLC1/scRNA2/GeoSubmission.scRNA2/Metadata.csv")
+write.csv(df, file = "//home/siwakorn/LLC1/scRNA2/GeoSubmission.scRNA2/ExpressionMatrix.csv")
+```
+
+```{r}
+test = CreateSeuratObject(counts = df)
+test <- NormalizeData(test)
+test = FindVariableFeatures(test)
+test =ScaleData(test, features = rownames(test))
+```
+
+
+```{r}
+test = RunPCA(test, features = VariableFeatures(test))
+test <- FindNeighbors(test, dims = 1:30)
+test <- FindClusters(test, resolution = 0.5)
+test <- RunUMAP(test, dims = 1:30)
+DimPlot(test)
+```
+
+#Save-----------------------
+```{r}
+#saveRDS(scRNA2, file = "//home/siwakorn/LLC1/RDS/scRNA2.SubmittedRevision.220202.rds") 
+#scRNA2 <- readRDS(file = "//home/siwakorn/LLC1/RDS/scRNA2.SubmittedRevision.220202.rds") 
+```
+
