@@ -15,11 +15,15 @@ cellranger count  --id=sample_no1
 
 ## Analysis in R (v.3.6)
 Part1: LLC1.Day6.Rmd
+
   To elucidate mechanism of EP2 antagonist and EP4 antagonist in LLC1 tumor growth suppression, LLC1-transplated mice were treated with Vechicle (n=2), EP2 antagonist alone (n=1), EP4 antagonist alone (n=1), and EP2 antagonist + EP4 antagonist (n=2) for 6 days and were subjected to scRNA-seq study.
   
 Part2: LLC1.TregDepletion.Rmd
+
    To evaluate contribution of Treg in LLC1 tumor growth, scRNA-seq of Treg Depletion (n=2) and vechicle treated mice (n=2) were performed.
-Part3: 
+
+Part3: LLC1.Day1.5.Rmd
+
    To evaluate temporal effect of  EP2 antagonist and EP4 antagonist, scRNA-seq of EP2 antagonist + EP4 antagonist treated mice (n=3) and vehicle treated mices (n=3) at day 1.5 was performed.
    
 ## Dependencies
@@ -34,6 +38,7 @@ Computation time was provided by the Supercomputing services, Human Genome Cente
 
 ## Feedback
 Feedback is always welcome.
+
 You can also reach me by 
 - siwakorn.punya@gmail.com
 - punyawatthananukool.siwakorn.78a@st.kyoto-u.ac.jp
