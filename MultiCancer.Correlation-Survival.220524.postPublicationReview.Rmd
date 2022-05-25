@@ -1,0 +1,598 @@
+---
+title: "Multi-cancer correlation-survival analysis"
+author: "Siwakorn"
+date: "2021/3/21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Library
+```{r}
+library(tidyverse)
+library(RTCGA.clinical)
+library(survminer)
+library(survival)
+library("cluster")
+library("magrittr")
+library("biomaRt")
+library(corrplot)
+library(reshape2)
+```
+
+#Setting up
+```{r}
+name <- c("LUSC","LUAD","BRCA","COAD","OV","BLCA","HNSC","LIHC","READ","STAD")
+Count.Dir <- c("/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.LUSC/TCGA-LUSC.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.LUAD/TCGA-LUAD.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.BRCA/TCGA-BRCA.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.COAD/TCGA-COAD.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.OVCA/TCGA-OV.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.BLCA/TCGA-BLCA.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.HNSC/TCGA-HNSC.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.LIHC/TCGA-LIHC.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.READ/TCGA-READ.htseq_fpkm.tsv",
+              "/yshare1/home/siwakorn/TCGA/DataPortal/GDC.TCGA.STAD/TCGA-STAD.htseq_fpkm.tsv"
+              
+              )
+Surv.Dir <- c("/home/siwakorn/TCGA/DataPortal/GDC.TCGA.LUSC/TCGA-LUSC.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.LUAD/TCGA-LUAD.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.BRCA/TCGA-BRCA.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.COAD/TCGA-COAD.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.OVCA/TCGA-OV.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.BLCA/TCGA-BLCA.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.HNSC/TCGA-HNSC.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.LIHC/TCGA-LIHC.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.READ/TCGA-READ.survival.tsv",
+              "/home/siwakorn/TCGA/DataPortal/GDC.TCGA.STAD/TCGA-STAD.survival.tsv"
+              )
+Count <- list()
+Count.mod <- list()
+Surv <- list()
+ensembl <- useMart("ensembl")
+Human.ensembl = useDataset("hsapiens_gene_ensembl",mart=ensembl)
+```
+
+#Data Preparation - Expression matrix (Count)
+```{r}
+for(i in 1:10){
+      print(name[i])
+      Count[[i]] <- read.table(file = Count.Dir[i], sep = "\t", header= T)
+      print(Count[[i]][1:10,1:10])
+      Count.mod[[i]] <- Count[[i]][,-1] %>% t() %>% as.data.frame()
+      colnames(Count.mod[[i]]) <- Count[[i]]$Ensembl_ID
+      print(Count.mod[[i]][1:10,1:10])
+      GenePool = colnames(Count.mod[[i]])
+      tmp = data.frame("Original" = GenePool,
+                       "New" = unlist(lapply(GenePool, function(x) substr(x,1,15) ))
+                       )
+      tmp2 = getBM(attributes =c("ensembl_gene_id", "ensembl_gene_id_version", "external_gene_name"), 
+                   filters = "ensembl_gene_id",
+                   values = tmp$New ,
+                   mart = Human.ensembl,
+                   useCache = FALSE
+                   )
+      tmp2$New <- tmp2$ensembl_gene_id
+      tmp3 = left_join(tmp,tmp2)
+      tmp3[is.na(tmp3$ensembl_gene_id),]$external_gene_name <- as.character(tmp3[is.na(tmp3$ensembl_gene_id),]$Original )
+      print(summary(tmp3$Original == colnames(Count.mod[[i]]))  )   #Validation
+      colnames(Count.mod[[i]]) <- tmp3$external_gene_name           #Add Label
+      Count.mod[[i]] <- Count.mod[[i]][,!colSums(Count.mod[[i]]) == 0]                      #Remove Gene (column) with 0 sum
+      print(Count.mod[[i]][1:10,1:10])
+}
+names(Count.mod) <- name
+lapply(Count.mod, dim)
+#saveRDS(Count.mod,file = "/yshare1/home/siwakorn/TCGA/RDS/GDC.10MultiCancer.ExpressionMatrix.210322.rds" )
+Count.mod = readRDS(file = "/home/siwakorn/TCGA/RDS/GDC.10MultiCancer.ExpressionMatrix.210322.rds" )
+```
+
+#Data Preparation - Survival
+```{r}
+selected.genes <- c("PTGS1","PTGS2","PTGER2","PTGER4")
+Surv.mod <- list()
+for(i in 1:10){
+      print(name[i])
+      Surv[[i]] <- read.table(file = Surv.Dir[i], sep = "\t", header= T)
+      Surv[[i]]$sample.new <- gsub("-",".",Surv[[i]]$sample)                                                             #Convert sample name
+      print(nrow(Count.mod[[i]]))
+      print(intersect(rownames(Count.mod[[i]]), Surv[[i]]$sample.new) %>% length())
+      tmp1 = dplyr::select(Surv[[i]], sample.new, OS, OS.time)
+      colnames(tmp1)[1] <- "Sample"
+      tmp2 = dplyr::select(Count.mod[[i]], PTGS1,PTGS2,PTGER2,PTGER4) %>% as_tibble(rownames = "Sample")
+      data1  <- left_join(tmp1,tmp2)
+      data = na.omit(data1)
+      for(j in selected.genes ){
+            L = rep(paste0(j,".Intermediate"),nrow(data))
+            E = data[,j]
+            L[E < quantile(E, c(0.33,0.66))[1]] <- paste0(j,".Low") 
+            L[E > quantile(E, c(0.33,0.66))[2]] <- paste0(j,".High") 
+            data[,paste0(j,".Group")] <- L
+      }
+      #Combine 2 genes
+      GeneSet = list(c("PTGS1","PTGS2"), c("PTGER2","PTGER4"))
+      SetName =c("COX","EP2_EP4")
+      for(k in 1:2){
+            a= GeneSet[[k]][1]
+            b= GeneSet[[k]][2]
+            tmp <- paste0(data[,paste0(a,".Group")],"-",data[,paste0(b,".Group")])
+            tmp[-c(grep(paste0(a,".High-",b,".High"), tmp ),grep(paste0(a,".Low-",b,".Low"), tmp ))] <- paste0(SetName[k], "-Intermediate")
+            tmp[c(grep(paste0(a,".High-",b,".High"), tmp ))] <- paste0(SetName[k], "-High")
+            tmp[c(grep(paste0(a,".Low-",b,".Low"), tmp ))] <- paste0(SetName[k], "-Low")
+            data[,paste0(a,"_",b)] <- factor(tmp, levels = c( paste0(SetName[k], "-High"), 
+                                                              paste0(SetName[k], "-Intermediate") ,
+                                                              paste0(SetName[k], "-Low") 
+                                                              ) 
+                                             )
+            q1a = quantile(data[,a], c(0.33,0.66) )[1]
+            q4a = quantile(data[,a], c(0.33,0.66) )[2]
+            q1b = quantile(data[,b], c(0.33,0.66) )[1]
+            q4b = quantile(data[,b], c(0.33,0.66) )[2]
+            #png(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig/GDC.TCGA.ExpressionProfile.",name[i],".",SetName[k],".png"), width =800, height = 800)
+            print(
+                  ggplot(data, aes_string(x = a, y = b, color = paste0(a,"_",b))) + 
+                  ggtitle(paste0(name[i], " ", SetName[k])) +      
+                  geom_point() + 
+                  geom_hline(yintercept = q1b) + geom_hline(yintercept = q4b)+
+                  geom_vline(xintercept = q1a) + geom_vline(xintercept = q4a)+
+                  theme_classic() +
+                  theme(axis.title = element_text(size = 27))
+                  )
+            #dev.off()
+            Surv.mod[[name[i] ]] <- data
+            print(Surv.mod[[name[i] ]] )
+      }
+}
+lapply(Surv.mod, dim)
+#saveRDS(Surv.mod,file = "/yshare1/home/siwakorn/TCGA/RDS/GDC.10MultiCancer.Survival.210322.rds" )
+#Surv.mod <- readRDS(file = "/home/siwakorn/TCGA/RDS/GDC.10MultiCancer.Survival.210322.rds" )
+
+#Surv.mod.bk <- Surv.mod
+```
+
+
+#COX score
+```{r}
+for(i in 1:10){
+      Surv.mod[[i]]$COX_Score1 <- (Surv.mod[[i]]$PTGS1 + Surv.mod[[i]]$PTGS2)/2
+      Surv.mod[[i]]$COX_Score2 <- (Surv.mod[[i]]$PTGER2 + Surv.mod[[i]]$PTGER4)/2
+      Surv.mod[[i]]$COX_Score3 <- (Surv.mod[[i]]$PTGS1 + Surv.mod[[i]]$PTGS2 + Surv.mod[[i]]$PTGER2 + Surv.mod[[i]]$PTGER4)/4
+      for(j in 1:2){
+            tmp = paste0("COX_Score",j)
+            a = quantile(Surv.mod[[i]][,tmp], c(0.33,0.66))[1]
+            b = quantile(Surv.mod[[i]][,tmp], c(0.33,0.66))[2]
+            label <- rep("COX-Intermediate",nrow(Surv.mod[[i]]) )
+            label[Surv.mod[[i]][,tmp] < a ] <- "COX-Low"
+            label[Surv.mod[[i]][,tmp] > b ] <- "COX-High"
+            Surv.mod[[i]][,paste0(tmp,".Group")] <- label
+            Surv.mod[[i]][,paste0(tmp,".Group")] <- factor(Surv.mod[[i]][,paste0(tmp,".Group")], levels = paste0("COX-", c("High","Intermediate","Low")))
+      }
+}
+```
+
+#PTGER score
+```{r}
+cutoff <- list(c(0.2,0.8), c(0.25,0.75), c(0.33,0.66))
+cutoff[[1]]
+for(i in 1:10){
+      Surv.mod[[i]]$PTGER_Score <- (Surv.mod[[i]]$PTGER2 + Surv.mod[[i]]$PTGER4)/2
+      #Surv.mod[[i]]$COX_Score3 <- (Surv.mod[[i]]$PTGS1 + Surv.mod[[i]]$PTGS2 + Surv.mod[[i]]$PTGER2 + Surv.mod[[i]]$PTGER4)/4
+      for(j in 1:3){
+            tmp = "PTGER_Score"
+            a = quantile(Surv.mod[[i]][,tmp], cutoff[[j]]  )[1]
+            b = quantile(Surv.mod[[i]][,tmp], cutoff[[j]]  )[2]
+            label <- rep("PTGER-Intermediate",nrow(Surv.mod[[i]]) )
+            label[Surv.mod[[i]][,tmp] < a ] <- "PTGER-Low"
+            label[Surv.mod[[i]][,tmp] > b ] <- "PTGER-High"
+            Surv.mod[[i]][,paste0(tmp,".Group",j)] <- label
+            Surv.mod[[i]][,paste0(tmp,".Group",j)] <- factor(Surv.mod[[i]][,paste0(tmp,".Group",j)], levels = paste0("PTGER-", c("High","Intermediate","Low")))
+      }
+}
+
+
+Surv.mod[[1]]
+for(i in 1:10){
+      for(j in 1:3){
+            print(
+                  ggplot(Surv.mod[[i]], aes_string(x = "PTGER2", y ="PTGER4", color = paste0("PTGER_Score.Group",j) ) ) +
+                        geom_point()
+            )
+      }
+      
+}
+```
+
+
+#Plot Survival x PTGER score
+```{r,fig.width=5,fig.height=5}
+tmp = c(".Q20-80",".Q25-75",".Q33-66")
+for(j in 1:10){
+      for(i in 1:2){
+            Surv.mod[[j]]$Group <-  Surv.mod[[j]][,paste0("PTGER_Score.Group",i)]
+            Surv.mod2[[j]] <- filter(Surv.mod[[j]], !Group == "PTGER-Intermediate")               #Remove COX intermediate
+            fit <-  survfit(Surv(OS.time,OS ) ~ Group, data = Surv.mod2[[j]]   ) 
+            plot = ggsurvplot(fit, data = Surv.mod2[[j]], 
+                              risk.table = F,
+                              size =2,
+                              pval = T,
+                              palette = c("red", "black","dodgerblue"),
+                              xlim = c(0,1826),
+                              break.time.by = 200,
+                              cumevents = F,
+                              cumcensor = F
+                              ) +
+                   ggtitle(paste0("SURVIVORSHIP OF ", name[j], " x PTGER-score ",i )) 
+            #tiff(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig.Revision/GDC.TCGA.Fig6F.Survival.",name[j],".PTGERSCORE",i,tmp[i],".tiff"), width =8, height =8, units = "in", res = 300  )
+           # png(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig/GDC.10Cancers/GDC.TCGA.Survival.",name[j],".PTGERSCORE",i,tmp[i],".png"), width =800, height = 800)
+            print(plot)
+            #dev.off()
+      }      
+}
+fit %>% str()
+fit$
+```
+
+
+
+
+
+
+#Correlation
+##Correlation heatmap (Single cancer)
+```{r}
+selected.genes = c("TNFSF4","TNFRSF4","FOXP3","TNFRSF9","CCL17","CCL22","PTGS1","PTGER2","PTGER4","PTGS2","IL6","CXCL2","FOS","NR4A1","VEGFD","CXCL8") 
+
+for(j in 1:10){
+      df.mod <- Count.mod[[j]]
+      df.cor <- dplyr::select(df.mod, selected.genes) %>% cor() %>% round(2)
+      melted_cormat <- melt(df.cor)
+      for(i in 1){
+            tiff(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig.Revision/GDC.TCGA.Correlation.",name[j],".210406.tiff" ),
+                width = 12, 
+                height = 12,
+                units = "in",
+                res = 300)
+            print(
+                  ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+                  geom_tile(color = "white")+
+                  geom_text(aes(Var2,Var1,label = value), color ="black",size=5) +
+                  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1), 
+                                       space = "Lab",name="Pearson\nCorrelation",na.value = "white")  +
+                  theme_minimal()+ # minimal theme
+                  theme(axis.text.x = element_text(angle = 90, vjust = 1, color ="black",  size = 20, hjust = 1),
+                        axis.text.y = element_text(color = "black", size = 20 ),
+                        axis.title = element_blank())+
+                  coord_fixed()
+      )
+      dev.off()
+
+}
+}
+df.cor
+df.mod
+```
+
+```{r}
+j=1
+df.mod <- Count.mod[[j]]
+df.cor <- dplyr::select(df.mod, selected.genes)  %>% cor() %>% round(2)
+df.cor
+```
+
+
+```{r}
+df.cor
+```
+
+##Heatmap of MultiCancer x SelectedGene
+```{r}
+
+selected.genes = c("PTGER2","PTGER4","PTGS1","CCL17","CCL22","FOXP3","CTLA4","IL2RA","TNFRSF9","PTGS2","IL6","CXCL2","CXCL8","IL1B","VEGFA","VEGFD","OSM")
+selected.group = "PTGER_Score.Group2"
+df.heatmap <- data.frame()
+for(i in 1:10){
+      df <- Count.mod[[i]][,selected.genes] %>% as_tibble(rownames = "Sample")
+      Surv.mod[[i]]$Group <- Surv.mod[[i]][,selected.group] 
+      tmp = Surv.mod[[i]] %>% as_tibble() %>% dplyr::select(Sample,Group)           
+      df <- left_join(tmp, df, by = "Sample") %>% na.omit()
+      df
+      df.mean <- as.data.frame(matrix(nrow =0, ncol = (length(selected.genes))))
+      colnames(df.mean) <- c(selected.genes)
+      m=1
+      df$Group <- as.factor(df$Group)
+      for(j in levels(df$Group)){
+            df2 <- filter(df, Group == j) %>% dplyr::select(selected.genes)
+            df2
+            df.mean[m,] <- c(as.vector(colMeans(df2) ))
+            m=m+1
+      }
+      df.scale <- as.data.frame(apply(df.mean, 2, scale) )
+      df.scale$Group <- levels(df$Group)
+      df.scale$Cancer <- name[i]
+      df.heatmap <- rbind(df.heatmap, df.scale)
+}
+
+df.heatmap <- df.heatmap %>% gather("Gene","Expression", -Cancer, -Group,) %>% dplyr::select(Cancer,Group,Gene,Expression)
+df.heatmap$Expression <- as.numeric(df.heatmap$Expression)
+df.heatmap$Gene <- factor(df.heatmap$Gene, levels = selected.genes)
+df.heatmap$Group <- factor(df.heatmap$Group, levels = levels(df$Group))
+df.heatmap$Cancer <- gsub("OVCA","OV",df.heatmap$Cancer)
+df.heatmap$Cancer <- factor(df.heatmap$Cancer, levels = name )
+df.heatmap2 <- filter(df.heatmap, !Gene %in% c("TGFB1","MMP9","TNF"))# %>% filter(Cancer %in% c("LUSC","BRCA","OV","LIHC") )
+df.heatmap2 <- filter(df.heatmap2, Cancer %in% c("BRCA","LUSC","OV","LIHC") )
+df.heatmap %>% filter(Gene == "PTGER4")
+df.heatmap2 
+for(i in 1){
+      #png(filename = "/yshare1/home/siwakorn/TCGA/Fig/GDC.10Cancers/GDC.TCGA.10Cancer.Heatmap.PTGERScore2.2.png", width = 1000, height = 500)
+      #tiff(filename = "/yshare1/home/siwakorn/TCGA/Fig.Revision/GDC.TCGA.10Cancer.Heatmap.PTGERScore2.tiff", width = 15, height = 15, units = "in", res = 300)
+      tiff(filename = "/yshare1/home/siwakorn/TCGA/Fig.Revision/GDC.TCGA.10Cancer.Fig6E.Heatmap.PTGERScore2.V2.tiff", width = 9, height = 7.5, units = "in", res = 500)
+      print(
+            ggplot(df.heatmap2, aes(y = Group, x = Gene, fill = Expression)) + 
+                  geom_tile(color = "white") +
+                  facet_grid(Cancer ~ . ) +                
+                  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", 
+                  space = "Lab",name="Scale Expression" ,na.value = "white")  +
+                  ylab("Cancer") +
+                  theme(axis.text.x = element_text(angle = 90,color = "black",size= 20, hjust=1 ),
+                        axis.text.y = element_text(color="black",size= 20, hjust =0),
+                        text= element_text(color ="black"),
+                        strip.background.y = element_rect(fill="black"),
+                        legend.position = "bottom",
+                        strip.text.y = element_text(face = "bold", hjust=0.5, color="white",size= 23)
+                        )
+      )
+      dev.off()
+}
+df2 <- gather("Gene","Expression")
+ggplot(df, aes(x = Group, y = TNFSF4) ) + geom_jitter()
+
+Surv.mod[[1]]
+Count.mod[["LUSC"]][1:10,selected.genes]
+
+lapply(Surv.mod, dim)
+```
+
+##ScatterPlot for correlation
+```{r}
+library(ggpubr)
+df.mod <- Count.mod[[1]]
+selected.genes <- c("CCL17","CCL22","FOXP3","TNFRSF9")
+for(i in selected.genes){
+      tiff(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig.Revision/GDC.LUSC.FigS7.Scatter.V2.PTGS1-",i,".tiff") , width = 8, height = 8, units = "in", res = 300)
+      #png(filename = folder("Fig",paste0("GDC.LUSC.Scatter.PTGS1-",i,".png") ), width = 800, height = 800)
+      print(
+            ggscatter(df.mod, x = "PTGS1", y = i, 
+                      add = "reg.line", conf.int = TRUE, 
+                      cor.coef = TRUE, cor.method = "pearson")+
+                  theme(axis.title = element_text(size =27))
+      )
+      dev.off()
+}
+selected.genes = c("IL6","CXCL2","VEGFD","OSM")
+for(i in selected.genes){
+      tiff(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig.Revision/GDC.LUSC.FigS7.Scatter.V2.PTGS2-",i,".tiff") , width = 8, height = 8, units = "in", res = 300)
+      #png(filename = folder("Fig",paste0("GDC.LUSC.Scatter.PTGS2-",i,".png") ), width = 800, height = 800)
+      print(
+            ggscatter(df.mod, x = "PTGS2", y = i, 
+                      add = "reg.line", conf.int = TRUE, 
+                      cor.coef = TRUE, cor.method = "pearson")+
+                  theme(axis.title = element_text(size =27))
+      )
+      dev.off()
+}
+```
+
+
+
+#Genomewide correlation (RScript)
+```{r}
+x = 3
+df.mod <- readRDS(file = "/yshare1/home/siwakorn/TCGA/RDS/GDC.MultiCancer.ExpressionMatrix.210321.rds" )
+df.mod <- df.mod[[x]]
+selected.genes <- colnames(df.mod)
+table = as.data.frame(matrix(ncol = 9, nrow = 0) )
+colnames(table) = c("Gene1","Gene2","p_val","t","df","correlation","Method","95%CI.1","95%CI.2")
+Stat<-list()
+m=1
+for(k in c("PTGS1","PTGS2","PTGER2","PTGER4")){
+      for(i in selected.genes){
+            test <- cor.test(df.mod[,k],df.mod[,i] )
+            table[m,] <- c(k,i,test$p.value,test$statistic, test$parameter,test$estimate, test$method,test$conf.int)
+            m=m+1
+            if( length(intersect(m, seq(1000,2000000,5000))) != 0 ) {
+                  print(paste0(m, " ", i))
+            }
+      }
+	Stat[[k]] <- table
+	table = as.data.frame(matrix(ncol = 9, nrow = 0) )
+	colnames(table) = c("Gene1","Gene2","p_val","t","df","correlation","Method","95%CI.1","95%CI.2")
+	m=1
+}
+#saveRDS(Stat, file = paste0("/yshare1/home/siwakorn/TCGA/RDS/GDC.BRCA.StatisticList.Final.210321.rds"))
+Stat <- readRDS(file = paste0("/yshare1/home/siwakorn/TCGA/RDS/GDC.BRCA.StatisticList.Final.210321.rds"))
+```
+
+
+#Deprecated code
+
+
+##How to modify Survial plot
+```{r}
+plot[[1]] + 
+      theme(axis.title.x = element_text(size =20, 
+                                        face = "bold", 
+                                        color ="blue"),
+            plot.title = element_text(face = "bold")
+            )
+plot[[1]] +
+      guides(colour = guide_legend("Group", title.theme = element_text(size =20),
+                                   label.theme = element_text(colour = "pink"))
+             )
+ggsurvplot(fit, 
+           data = Surv.mod2[[j]], 
+           risk.table = F,
+           size =2,
+           pval = T,
+           pval.size =5,
+           palette = c("red", "black","dodgerblue"), 
+           xlim = c(0,1826), break.time.by = 200,cumevents = F, cumcensor = F) 
+```
+
+
+
+
+
+##Function customize label
+```{r}
+customize_labels <- function (p, font.title = NULL,
+                              font.subtitle = NULL, font.caption = NULL,
+                              font.x = NULL, font.y = NULL, font.xtickslab = NULL, font.ytickslab = NULL)
+{
+  original.p <- p
+  if(is.ggplot(original.p)) list.plots <- list(original.p)
+  else if(is.list(original.p)) list.plots <- original.p
+  else stop("Can't handle an object of class ", class (original.p))
+  .set_font <- function(font){
+    font <- ggpubr:::.parse_font(font)
+    ggtext::element_markdown (size = font$size, face = font$face, colour = font$color)
+  }
+  for(i in 1:length(list.plots)){
+    p <- list.plots[[i]]
+    if(is.ggplot(p)){
+      if (!is.null(font.title)) p <- p + theme(plot.title = .set_font(font.title))
+      if (!is.null(font.subtitle)) p <- p + theme(plot.subtitle = .set_font(font.subtitle))
+      if (!is.null(font.caption)) p <- p + theme(plot.caption = .set_font(font.caption))
+      if (!is.null(font.x)) p <- p + theme(axis.title.x = .set_font(font.x))
+      if (!is.null(font.y)) p <- p + theme(axis.title.y = .set_font(font.y))
+      if (!is.null(font.xtickslab)) p <- p + theme(axis.text.x = .set_font(font.xtickslab))
+      if (!is.null(font.ytickslab)) p <- p + theme(axis.text.y = .set_font(font.ytickslab))
+      list.plots[[i]] <- p
+    }
+  }
+  if(is.ggplot(original.p)) list.plots[[1]]
+  else list.plots
+}
+```
+
+##Survival ------------------
+##Plot
+```{r}
+selected.genes <- c("PTGS1","PTGS2","PTGER2","PTGER4")
+for(j in 1:10){
+      for(i in selected.genes ){
+            Surv.mod[[j]]$Group <-  Surv.mod[[j]][,paste0(i,".Group")]
+            fit <-  survfit(Surv(OS.time,OS ) ~ Group, data = Surv.mod[[j]]   ) 
+            png(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig/GDC.10Cancers/GDC.TCGA.Survival.",name[j],".",i,".210323.png" ),
+                width = 800, 
+                height = 800)
+            plot = ggsurvplot(fit, data = Surv.mod[[j]], 
+                              risk.table = F,
+                              pval = T,
+                              size =2,
+                              palette = c("red", "black","dodgerblue"),
+                              xlim = c(0,3650),
+                              break.time.by = 200
+                              ) + 
+            ggtitle(paste0("SURVIVORSHIP OF ", name[j], " x ",i )) 
+            plot <- customize_labels(plot,
+                              font.y        = c(27, "bold", "black"),
+                              font.x        = c(27, "bold", "black")
+                              )
+      print(plot)
+      dev.off()
+      }
+}
+
+
+```
+
+##Plot Combine COX1 COX2
+```{r}
+Surv.mod2 <- list()
+levels(Surv.mod[[1]]$PTGS1_PTGS2)
+for(i in 1:5){
+      Surv.mod2[[i]] <- filter(Surv.mod[[i]], PTGS1_PTGS2 %in% c("COX-High","COX-Low") )
+      fit <-  survfit(Surv(OS.time,OS ) ~ PTGS1_PTGS2, data = Surv.mod2[[i]]   )
+      plot = ggsurvplot(fit, data = Surv.mod2[[i]], 
+                 risk.table = F,
+                 size =2,
+                 palette = c("red", "dodgerblue"),
+                 pval =T,
+                 pval.method = T,
+                 #legend.labs = c("COX1 High COX2 High", "Other", "COX1 Low CO2 Low"),          #For 3 groups
+                 #palette = c("red", "black","dodgerblue"),                                     #For 3 groups
+                 xlim = c(0,1826),
+                 break.time.by = 200
+                 ) + 
+      
+            ggtitle(paste0("SURVIVORSHIP OF ", name[i])) 
+      plot <- customize_labels(plot,
+                               font.y        = c(27, "bold", "black"),
+                               font.x        = c(27, "bold", "black")
+                               )
+      png(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig/GDC.TCGA.Survival.",name[i],".COX.210322.png" ), width = 1200, height = 800)
+      print(
+            plot
+            ) 
+      dev.off()
+}
+Surv.mod[[1]]
+``` 
+
+##Plot Combine EP2 EP4
+```{r}
+for(i in 1:5){
+      fit <-  survfit(Surv(OS.time,OS ) ~ PTGER2_PTGER4, data = Surv.mod[[i]]   )
+      plot = ggsurvplot(fit, data = Surv.mod[[i]], 
+                 risk.table = F,
+                 size =2,
+                 legend.labs = c("PTGER2 High PTGER4 High", "Other", "PTGER2 Low PTGER4 Low"),
+                 palette = c("red", "black","dodgerblue"),
+                 #xlim = c(0,1826),
+                 #break.time.by = 200
+                 ) + 
+      
+            ggtitle(paste0("SURVIVORSHIP OF ", name[i], " x ", "PTGER2-PTGER4")) 
+      plot <- customize_labels(plot,
+                               font.y        = c(27, "bold", "black"),
+                               font.x        = c(27, "bold", "black")
+                               )
+      png(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig/GDC.MultiCancer/GDC.TCGA.Survival.",name[i],".EP2-EP4.210321.png" ), width = 1200, height = 800)
+      print(
+            plot
+            ) 
+      dev.off()
+}
+```
+
+
+##Plot COX socre
+```{r}
+for(j in 1:10){
+      Surv.mod2[[j]] <- Surv.mod[[j]] 
+      for(i in 2){
+            Surv.mod2[[j]]$Group <-  Surv.mod2[[j]][,paste0("COX_Score",i,".Group")]
+            Surv.mod2[[j]] <- filter(Surv.mod2[[j]], !Group == "COX-Intermediate")               #Remove COX intermediate
+            Surv.mod2[[j]]
+            fit <-  survfit(Surv(OS.time,OS ) ~ Group, data = Surv.mod2[[j]]   ) 
+            plot = ggsurvplot(fit, data = Surv.mod2[[j]], 
+                              risk.table = F,
+                              size =2,
+                              pval = T,
+                              palette = c("red", "black","dodgerblue"),
+                              xlim = c(0,1826),
+                              break.time.by = 200,
+                              cumevents = F,
+                              cumcensor = F
+                              ) +
+                   ggtitle(paste0("SURVIVORSHIP OF ", name[j], " x COX-score ",i )) 
+            #png(filename = paste0("/yshare1/home/siwakorn/TCGA/Fig/GDC.10Cancers/GDC.TCGA.Survival.3Q3366.",name[j],".COXSCORE",i,".png"), width =800, height = 800)
+            print(plot)
+            dev.off()
+      }      
+}
+```
+
+
+
